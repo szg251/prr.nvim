@@ -5750,7 +5750,7 @@ load_commits = function(callback)
     return
   end
   if not vim.g.pr_review_head and not M._commit_mode then
-    -- Sessions from before commit mode: in PR mode the review change sits on the PR head
+    -- Sessions from before commit mode, whose review change was created with `jj new <PR head>`
     local change = jj.current_change()
     vim.g.pr_review_head = change and change.parents[1]
   end
@@ -5893,7 +5893,7 @@ function M.goto_commit(commit_id, target_path)
     commit.short, commit.subject)
 
   M._switching_commit = true
-  jj.move_review_change(commit.id, description, function(ok, err, change_id)
+  jj.move_review_change(commit.parents, commit.id, description, function(ok, err, change_id)
     M._switching_commit = false
     if not ok then
       vim.notify("Failed to switch to commit " .. commit.short .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
@@ -5919,20 +5919,26 @@ function M.exit_commit_mode()
   local description = string.format("%s%d: PR head -> %s", jj.review_description_prefix, vim.g.pr_review_number,
     vim.g.pr_review_base_branch or "base")
 
+  if not vim.g.pr_review_head then
+    vim.notify("PR head unknown, use :PRRefresh to go back to the whole PR", vim.log.levels.ERROR)
+    return
+  end
+
   M._switching_commit = true
-  jj.move_review_change(vim.g.pr_review_head or "@-", description, function(ok, err, change_id)
-    M._switching_commit = false
-    if not ok then
-      vim.notify("Failed to go back to the PR head: " .. (err or "unknown"), vim.log.levels.ERROR)
-      return
-    end
-    vim.g.pr_review_change = change_id
-    M._commit_mode = false
-    github.comment_commit_id = nil
-    save_session()
-    reload_review_view(target_path)
-    vim.notify("Reviewing the whole PR", vim.log.levels.INFO)
-  end)
+  jj.move_review_change({ vim.g.pr_review_merge_base }, vim.g.pr_review_head, description,
+    function(ok, err, change_id)
+      M._switching_commit = false
+      if not ok then
+        vim.notify("Failed to go back to the PR head: " .. (err or "unknown"), vim.log.levels.ERROR)
+        return
+      end
+      vim.g.pr_review_change = change_id
+      M._commit_mode = false
+      github.comment_commit_id = nil
+      save_session()
+      reload_review_view(target_path)
+      vim.notify("Reviewing the whole PR", vim.log.levels.INFO)
+    end)
 end
 
 -- Commit to start commit mode on: the last one reviewed, else the first with unviewed files

@@ -219,6 +219,10 @@ function M.checkout_pr(pr, replace_change, opts, callback)
 
     local description = string.format("%s%d: %s -> %s", M.review_description_prefix, pr.number,
       pr.head_label or pr.head_branch, pr.base_branch)
+    merge_base = merge_base or base
+    -- The review change sits on the merge-base with the PR head's content restored into it, so git
+    -- (HEAD = merge-base in a colocated workspace) shows the PR's changes too: gitsigns, fugitive, git diff
+    local restore_head = { "restore", "--from", head }
 
     local workspaces = M.workspaces()
     local main_root = workspaces.default or M.root()
@@ -233,22 +237,26 @@ function M.checkout_pr(pr, replace_change, opts, callback)
         run({ "workspace", "update-stale" }, root)
         local previous = M.current_review_pr(root) and M.current_change(root)
         replace_change = previous and previous.change_id or nil
-        commands = { { "new", head, "-m", description } }
+        commands = { { "new", merge_base, "-m", description }, restore_head }
       else
         if root then
           run({ "workspace", "forget", name })
         end
         root = opts.path or M.default_workspace_path(main_root, pr.number)
-        commands = { { "workspace", "add", "--name", name, "-r", head, "-m", description, root } }
+        commands = { { "workspace", "add", "--name", name, "-r", merge_base, "-m", description, root } }
         -- `workspace add` must run from an existing workspace
         run_sequence(commands, function(ok, err)
           if not ok then
             callback(false, "Failed to create review workspace: " .. (err or "unknown"))
             return
           end
+          if not run(restore_head, root) then
+            callback(false, "Failed to restore the PR head into the review workspace")
+            return
+          end
           local change = M.current_change(root)
           callback(true, nil, {
-            merge_base = merge_base or base,
+            merge_base = merge_base,
             head = head,
             review_change = change and change.change_id,
             root = root,
@@ -259,7 +267,7 @@ function M.checkout_pr(pr, replace_change, opts, callback)
         return
       end
     else
-      commands = { { "new", head, "-m", description } }
+      commands = { { "new", merge_base, "-m", description }, restore_head }
     end
 
     if replace_change and exists(replace_change, root) then
@@ -273,7 +281,7 @@ function M.checkout_pr(pr, replace_change, opts, callback)
       end
       local change = M.current_change(root)
       callback(true, nil, {
-        merge_base = merge_base or base,
+        merge_base = merge_base,
         head = head,
         review_change = change and change.change_id,
         root = root,
@@ -318,7 +326,7 @@ end
 -- The PR's commits, oldest first, each with the files it changes.
 -- Merge commits are diffed against their auto-merged parents (as `jj diff -r` does),
 -- so they only show conflict resolutions.
--- callback(commits) with commits = { { id, short, subject, parent, is_merge, files } }
+-- callback(commits) with commits = { { id, short, subject, parent, parents, is_merge, files } }
 function M.pr_commits(merge_base, head, callback)
   local template = 'commit_id ++ "\\t" ++ commit_id.short(8) ++ "\\t" ++ parents.map(|c| c.commit_id()).join(" ")'
     .. ' ++ "\\t" ++ description.first_line() ++ "\\n"'
@@ -335,6 +343,7 @@ function M.pr_commits(merge_base, head, callback)
             short = short,
             subject = subject ~= "" and subject or "(no description)",
             parent = parent_list[1],
+            parents = parent_list,
             is_merge = #parent_list > 1,
             files = {},
           })
@@ -366,11 +375,14 @@ function M.diff_commit_file(commit, path, callback)
   end)
 end
 
--- Replace the review change in the review root with a new one on top of rev.
+-- Replace the review change in the review root with a new one on base_revs whose content is
+-- content_rev's tree. git's HEAD then is the diff base, so git tools show the same diff as the plugin.
 -- The previous review change is abandoned. callback(ok, err, new_change_id)
-function M.move_review_change(rev, description, callback)
+function M.move_review_change(base_revs, content_rev, description, callback)
   local previous = M.current_review_pr() and M.current_change()
-  local commands = { { "new", rev, "-m", description } }
+  local new_cmd = vim.list_extend({ "new" }, base_revs)
+  vim.list_extend(new_cmd, { "-m", description })
+  local commands = { new_cmd, { "restore", "--from", content_rev } }
   if previous then
     table.insert(commands, { "abandon", previous.change_id })
   end
