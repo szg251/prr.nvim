@@ -396,20 +396,7 @@ function M.move_review_change(base_revs, content_rev, description, callback)
   end)
 end
 
--- Content of a file at a given revision, as a list of lines (nil if missing)
-function M.file_lines_at(rev, path)
-  local ok, out = run({ "file", "show", "--ignore-working-copy", "-r", rev, fileset(path) })
-  if not ok then
-    return nil
-  end
-  local lines = vim.split(out, "\n", { plain = true })
-  if lines[#lines] == "" then
-    table.remove(lines)
-  end
-  return lines
-end
-
--- Same as file_lines_at, asynchronous. callback(lines or nil)
+-- Content of a file at a given revision, as a list of lines. callback(lines or nil if missing)
 function M.file_lines_at_async(rev, path, callback)
   run_async({ "file", "show", "--ignore-working-copy", "-r", rev, fileset(path) }, function(ok, out)
     if not ok then
@@ -447,42 +434,6 @@ function M.diff_file(merge_base, path, callback)
     end
     local diff = vim.diff(old, new, { ctxlen = 0 }) or ""
     callback(vim.split(diff, "\n", { plain = true, trimempty = true }))
-  end)
-end
-
--- Changed files with the first changed line of each. callback(files)
-function M.get_modified_files_with_lines(merge_base, callback)
-  M.changed_files(merge_base, function(files)
-    if #files == 0 then
-      callback({})
-      return
-    end
-
-    local pending = #files
-    local function done()
-      pending = pending - 1
-      if pending == 0 then
-        callback(files)
-      end
-    end
-
-    for _, file in ipairs(files) do
-      file.line = 1
-      if file.status == "D" then
-        done()
-      else
-        M.diff_file(merge_base, file.path, function(lines)
-          for _, diff_line in ipairs(lines) do
-            local line_num = diff_line:match("^@@%s+%-%d+[,%d]*%s+%+(%d+)")
-            if line_num then
-              file.line = math.max(tonumber(line_num), 1)
-              break
-            end
-          end
-          done()
-        end)
-      end
-    end
   end)
 end
 

@@ -1,5 +1,4 @@
 - Arquivos deletados estao sendo marcados como viewed ao serem abertos
-- No diff não splitado, ta uma identação pra trás (e sem highlight)
 - No README, em como usar, falar mais sobre o uso direto com :PR (Sem chamar os comandos diretos) ao em vez de chamar os comandos separados.  Fale mais do menu
 - PR Info: Trazer mais infos do CI
 - PR Info: Nao ta fechando com q ou esc.

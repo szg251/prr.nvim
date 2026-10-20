@@ -49,8 +49,8 @@ to review it.
 
 • Neovim >= 0.11.0
 • GitHub CLI (`gh`) installed and authenticated
-• jj (Jujutsu) - the repository must be a jj repo (a colocated jj + git
-  repo is fine)
+• jj (Jujutsu) - the repository must be a jj repo; a colocated jj + git
+  repo is needed for git tools (gitsigns, fugitive) to show the diff
 • Optional: bat for syntax-highlighted previews in fzf-lua
 
 ==============================================================================
@@ -110,7 +110,8 @@ REVIEW WORKFLOW~
                                                      *:PRReview*
 :PRReview               Select and start reviewing a PR from the list of
                         open PRs. Fetches the PR with `jj git fetch` and
-                        creates a review change on the PR head (see
+                        creates a review change on the merge-base with
+                        the PR head's files restored into it (see
                         |github-pr-reviewer-review-modes|).
 
                                                      *:PRListReviewRequests*
@@ -119,7 +120,7 @@ REVIEW WORKFLOW~
                         viewed without starting a review.
 
                                                      *:PRRefresh*
-:PRRefresh              Re-fetch the PR and create a new review change on
+:PRRefresh              Re-fetch the PR and recreate the review change for
                         the new PR head (in the same workspace in
                         workspace mode), abandoning the old one. Local
                         edits made in the review change are discarded.
@@ -217,7 +218,7 @@ Configure the plugin by calling the setup function: >lua
 
     require("github-pr-reviewer").setup({
       -- "workspace": review in a separate jj workspace in a new tab
-      -- "inplace": `jj new` the PR head in the current workspace
+      -- "inplace": review change in the current workspace
       review_mode = "workspace",
 
       -- fun(repo_root, pr_number) -> path for the review workspace
@@ -235,17 +236,11 @@ Configure the plugin by calling the setup function: >lua
       -- Show icons/emojis in UI
       show_icons = true,
 
-      -- Show inline diff in buffers
-      show_inline_diff = true,
-
       -- Show floating windows with PR info, stats, and keymaps
       show_floats = true,
 
       -- Key to mark file as viewed and go to next file
       mark_as_viewed_key = "<CR>",
-
-      -- Key to toggle between unified and split diff view
-      diff_view_toggle_key = "<C-v>",
 
       -- Key to toggle floating windows visibility
       toggle_floats_key = "<C-r>",
@@ -255,12 +250,6 @@ Configure the plugin by calling the setup function: >lua
       next_commit_key = "<C-n>",
       prev_commit_key = "<C-p>",
       commit_sidebar_toggle_key = "<C-b>",
-
-      -- Key to jump to next hunk
-      next_hunk_key = "<C-j>",
-
-      -- Key to jump to previous hunk
-      prev_hunk_key = "<C-k>",
 
       -- Key to go to next modified file
       next_file_key = "<C-l>",
@@ -276,7 +265,7 @@ review_mode             (string, default: "workspace")
                         Where the review happens. Options:
                         "workspace" - separate jj workspace opened in a
                                       new tab
-                        "inplace"   - `jj new <pr head>` in the current
+                        "inplace"   - review change in the current
                                       workspace
                         See |github-pr-reviewer-review-modes|.
 
@@ -305,11 +294,6 @@ show_icons              (boolean, default: true)
                         Show icons/emojis in UI. Set to false for a
                         text-only interface.
 
-                                                     *github-pr-reviewer.show_inline_diff*
-show_inline_diff        (boolean, default: true)
-                        Show inline diff in buffers. Removed lines appear
-                        as virtual text above changes.
-
                                                      *github-pr-reviewer.show_floats*
 show_floats             (boolean, default: true)
                         Show floating windows with PR info, stats, and
@@ -320,11 +304,6 @@ show_floats             (boolean, default: true)
 mark_as_viewed_key      (string, default: "<CR>")
                         Key to mark file as viewed and jump to next file.
                         Only works in review mode.
-
-                                                     *github-pr-reviewer.diff_view_toggle_key*
-diff_view_toggle_key    (string, default: "<C-v>")
-                        Key to toggle between unified (inline) and split
-                        (side-by-side) diff view. Only works in review mode.
 
                                                      *github-pr-reviewer.toggle_floats_key*
 toggle_floats_key       (string, default: "<C-r>")
@@ -347,16 +326,6 @@ prev_commit_key         (string, default: "<C-p>")
 commit_sidebar_toggle_key (string, default: "<C-b>")
                         Switch the sidebar between the file list and the
                         commit tree.
-
-                                                     *github-pr-reviewer.next_hunk_key*
-next_hunk_key           (string, default: "<C-j>")
-                        Key to jump to next hunk. Only works in review
-                        mode.
-
-                                                     *github-pr-reviewer.prev_hunk_key*
-prev_hunk_key           (string, default: "<C-k>")
-                        Key to jump to previous hunk. Only works in
-                        review mode.
 
                                                      *github-pr-reviewer.next_file_key*
 next_file_key           (string, default: "<C-l>")
@@ -405,11 +374,17 @@ REVIEW MODES~
 
 Starting a review runs `jj git fetch` (only the base branch from origin and
 the head branch from origin or the fork remote) and creates a review
-change, whose description starts with `pr-review #<N>`.
+change, whose description starts with `pr-review #<N>`. The review change
+sits on the merge-base with the PR head's files restored into it: files on
+disk are exactly the PR head, while git's HEAD (colocated repo) is the diff
+base, so git tools show the PR's changes (see |github-pr-reviewer-diffs|).
+The PR's commits are never the working copy, so local edits can't rewrite
+them; they go into the throwaway review change.
 
 Workspace mode (default, `review_mode = "workspace"`): >bash
-    jj workspace add --name pr-<N> -r <pr head> \
+    jj workspace add --name pr-<N> -r <merge-base> \
       -m "pr-review #<N>: <head> -> <base>" <path>
+    jj restore --from <pr head>   # in the new workspace
 <
 Neovim opens a new tab and |:tcd|s into the workspace. Your original
 checkout and other tabs are untouched (no LSP/watcher churn). An existing
@@ -422,9 +397,10 @@ If you start a new review choosing "continue without cleanup", the old
 workspace stays on disk. Remove it with `jj workspace remove pr-<N>`.
 
 Inplace mode (`review_mode = "inplace"`): runs
-`jj new <pr head> -m "pr-review #<N>: ..."` in the current workspace and
-remembers the change you were on. Cleanup goes back to it with `jj edit`
-(or `jj new` on its parents if jj auto-abandoned it because it was empty).
+`jj new <merge-base> -m "pr-review #<N>: ..."` and
+`jj restore --from <pr head>` in the current workspace and remembers the
+change you were on. Cleanup goes back to it with `jj edit` (or `jj new` on
+its parents if jj auto-abandoned it because it was empty).
 Your work in progress lives in its own change, so it is never touched.
 
 Diffs are computed against the merge-base of the PR head and the base
@@ -454,9 +430,7 @@ Benefits:
 NAVIGATION~
                                                      *github-pr-reviewer-navigation*
 
-Hunk Navigation (within a file):
-• <C-j> (default) - Jump to next hunk
-• <C-k> (default) - Jump to previous hunk
+For hunks within a file, use your git tools (see |github-pr-reviewer-diffs|).
 
 File Navigation (between modified files):
 • <C-l> (default) - Go to next modified file
@@ -464,7 +438,6 @@ File Navigation (between modified files):
 • <CR> (default) - Mark file as viewed and jump to next file
 
 View Controls:
-• <C-v> (default) - Toggle between unified and split diff view
 • <C-r> (default) - Toggle floating windows visibility
 
 All keybindings are configurable and only activate during PR review mode.
@@ -477,12 +450,14 @@ Review the PR one commit at a time instead of all at once:
 • <C-n> / <C-p> (default) - Next / previous commit
 • <C-b> (default) - Switch the sidebar between files and commits
 
-In commit mode the review change is moved on top of that commit (`jj new
-<commit>`), so the files on disk are the commit's version and LSP, split view
-and inline diff work as usual. The diff is the commit's own change against its
-parent; merge commits are diffed against their auto-merged parents, so they
-only show conflict resolutions. File list, file navigation and floats show
-the current commit.
+In commit mode the review change is recreated on the commit's parents with
+the commit's files restored into it (`jj new <parents>` + `jj restore --from
+<commit>`), so the files on disk are the commit's version and git tools show
+only that commit's changes. Going back to the whole PR does the same with the
+merge-base and the PR head. Merge commits are listed against their
+auto-merged parents, so the file list only shows conflict resolutions, while
+git's HEAD is the first parent, so git tools show the merge against its first
+parent. File list, file navigation and floats show the current commit.
 
 The commit sidebar lists the PR's commits (oldest first) with viewed progress;
 the current commit is expanded to its files. <CR> on a commit enters it (on
@@ -521,19 +496,17 @@ The review buffer is an interactive file browser showing all changed files:
 CHANGE PROGRESS INDICATOR~
                                                      *github-pr-reviewer-progress-indicator*
 
-When reviewing a file with changes, three floating windows provide context:
+When reviewing a file of the PR, three floating windows provide context:
 
-Left Float (Progress):
+General Float:
+• File position - File x/total (plus Commit i/n in commit mode)
+
+Buffer Float:
 • Viewed status - Shows if the file has been marked as viewed
-• Change progress - Current change position (e.g., "2/5 changes")
-• Mark as viewed - Key to mark file as viewed
-
-Middle Float (Stats):
 • Stats - +additions ~modifications -deletions
-• Comments - 💬 Number of posted PR comments in this file
-• Pending - 💭 Number of pending comments you've drafted
+• Comments - 💬 Number of PR comments in this file
 
-Right Float (Keymaps):
+Keymaps Float:
 • Shows available keyboard shortcuts for review mode
 
 Toggle Floating Windows:
@@ -541,26 +514,21 @@ Toggle Floating Windows:
 • Set show_floats = false in config to disable them by default
 • Useful when you want a cleaner view or need more screen space
 
-SPLIT DIFF VIEW~
-                                                     *github-pr-reviewer-split-diff*
+VIEWING DIFFS~
+                                                     *github-pr-reviewer-diffs*
 
-Toggle between unified (inline) and split (side-by-side) diff view with
-<C-v> (default):
+The plugin doesn't draw diffs itself. Because git's HEAD in the review
+checkout is the diff base, your git tools show exactly the PR's changes (or
+the current commit's in commit mode):
 
-Unified View (Default):
-• Shows changes inline with diff highlighting
-• Deleted lines appear as virtual text above changes
-• Added/modified lines highlighted in green
+• gitsigns.nvim - signs, ]c / [c hunk navigation, `:Gitsigns preview_hunk`
+• vim-fugitive - `:Gvdiffsplit` for a side-by-side diff
+• `git diff HEAD` in a terminal
 
-Split View:
-• Left window: Base version (before changes)
-• Right window: Current version (after changes)
-• Both windows in diff mode with synchronized scrolling
-• No inline diff markers needed - native Vim diff highlighting
-
-The split view makes it easier to compare larger changes side-by-side.
-Press <C-v> again to return to unified view. The view mode persists as you
-navigate between files with <C-l>/<C-h>.
+This requires a colocated jj + git repo (workspace mode creates a git
+worktree for the review workspace when the repo is colocated). Deleted files
+can't be shown by git tools from the file list, so the plugin opens them as
+a read-only `<path> [DELETED]` buffer with the base content.
 
 SESSION PERSISTENCE~
                                                      *github-pr-reviewer-session*
@@ -637,11 +605,8 @@ These keymaps are automatically configured and only work during PR review
 mode (they won't interfere with normal usage):
 
 • <CR> (configurable) - Mark file as viewed and jump to next file
-• <C-j> (configurable) - Jump to next hunk
-• <C-k> (configurable) - Jump to previous hunk
 • <C-l> (configurable) - Go to next modified file
 • <C-h> (configurable) - Go to previous modified file
-• <C-v> (configurable) - Toggle between unified and split diff view
 • <C-r> (configurable) - Toggle floating windows visibility
 
 ==============================================================================
@@ -695,27 +660,23 @@ Telescope and fzf-lua provide enhanced comment browsing with file previews:
 GITSIGNS.NVIM~
                                                      *github-pr-reviewer-gitsigns*
 
-gitsigns.nvim is optional - the plugin has built-in inline diff
-visualization. However, gitsigns can still be useful for:
-
-• Hunk navigation with ]h and [h
-• Interactive hunk staging/unstaging
-• Additional git blame and diff features
-
-Note: in a colocated jj + git repo, git HEAD is the PR head, so gitsigns
-shows no PR hunks by default. Use the built-in inline diff to see the PR's
-changes.
-
-To use gitsigns instead of built-in inline diff: >lua
-
-    require("github-pr-reviewer").setup({
-      show_inline_diff = false,
-    })
+gitsigns.nvim is the recommended way to see the PR's hunks (the plugin has
+no built-in diff view). In a colocated jj + git repo, git's HEAD in the
+review checkout is the diff base and the git index matches it, so with a
+default setup gitsigns shows exactly the PR's changes (or the current
+commit's in commit mode): >lua
 
     require("gitsigns").setup({
       -- your gitsigns config
     })
+
+    local gs = require("gitsigns")
+    vim.keymap.set("n", "]c", function() gs.nav_hunk("next") end)
+    vim.keymap.set("n", "[c", function() gs.nav_hunk("prev") end)
+    vim.keymap.set("n", "<leader>hp", gs.preview_hunk)
 <
+With vim-fugitive, `:Gvdiffsplit` shows the current file side by side with
+the diff base. See |github-pr-reviewer-diffs|.
 
 ==============================================================================
 10. TROUBLESHOOTING                          *github-pr-reviewer-troubleshooting*

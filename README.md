@@ -31,9 +31,8 @@ It is a experimental project and may contain bugs. Use at your own risk.
 - ✅ **Fork PR support** - Automatically handles PRs from forks
 - ✅ **Review requests** - List PRs where you're requested as reviewer
 - ✅ **Review buffer** - Interactive file browser with foldable directories
-- ✅ **Split diff view** - Toggle between unified and split (side-by-side) diff view
 - ✅ **Change tracking** - See your progress with floating indicators (toggle on/off)
-- ✅ **Inline diff** - Built-in diff visualization (no gitsigns required)
+- ✅ **Works with your git tools** - git's `HEAD` is the diff base, so gitsigns, fugitive and `git diff HEAD` show exactly the PR's changes
 
 ### Comment Management
 - 💬 **View comments inline** - PR comments appear as virtual text with reactions
@@ -62,7 +61,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 
 - Neovim >= 0.11.0
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated
-- [jj (Jujutsu)](https://github.com/jj-vcs/jj) - the repository must be a jj repo (a colocated jj + git repo is fine)
+- [jj (Jujutsu)](https://github.com/jj-vcs/jj) - the repository must be a jj repo; a colocated jj + git repo is needed for git tools (gitsigns, fugitive) to show the diff
 - Optional: [bat](https://github.com/sharkdp/bat) for syntax-highlighted previews in fzf-lua
 
 ## Installation
@@ -117,7 +116,7 @@ EOF
 ```lua
 require("github-pr-reviewer").setup({
   -- Where to review: "workspace" (default) checks the PR out in a separate jj
-  -- workspace opened in a new tab; "inplace" runs `jj new <pr head>` in the
+  -- workspace opened in a new tab; "inplace" creates the review change in the
   -- current workspace
   review_mode = "workspace",
 
@@ -137,9 +136,6 @@ require("github-pr-reviewer").setup({
   -- Show icons/emojis in UI (set to false for a text-only interface)
   show_icons = true,
 
-  -- Show inline diff in buffers (old lines as virtual text above changes)
-  show_inline_diff = true,
-
   -- Show floating windows with PR info, stats, and keymaps
   show_floats = true,
 
@@ -149,9 +145,6 @@ require("github-pr-reviewer").setup({
   -- Key to mark file as viewed and go to next file (only works in review mode)
   mark_as_viewed_key = "<CR>",
 
-  -- Key to toggle between unified and split diff view (only works in review mode)
-  diff_view_toggle_key = "<C-v>",
-
   -- Key to toggle floating windows visibility (only works in review mode)
   toggle_floats_key = "<C-r>",
 
@@ -160,12 +153,6 @@ require("github-pr-reviewer").setup({
   next_commit_key = "<C-n>",           -- next commit (enters commit mode)
   prev_commit_key = "<C-p>",           -- previous commit (enters commit mode)
   commit_sidebar_toggle_key = "<C-b>", -- switch the sidebar between files and commits
-
-  -- Key to jump to next hunk (only works in review mode)
-  next_hunk_key = "<C-j>",
-
-  -- Key to jump to previous hunk (only works in review mode)
-  prev_hunk_key = "<C-k>",
 
   -- Key to go to next modified file (only works in review mode)
   next_file_key = "<C-l>",
@@ -189,7 +176,7 @@ require("github-pr-reviewer").setup({
 |---------|-------------|
 | `:PRReview` | Select and start reviewing a PR |
 | `:PRListReviewRequests` | List PRs where you are requested as reviewer |
-| `:PRRefresh` | Fetch the latest PR head and recreate the review change on it |
+| `:PRRefresh` | Fetch the latest PR head and recreate the review change for it |
 | `:PRReviewCleanup` | End review, abandon the review change, remove the review workspace (or return to your previous change) |
 | `:PRInfo` | Show PR information (stats, reviews, merge status) |
 | `:PROpen` | Open PR in browser |
@@ -296,11 +283,13 @@ See the [Commands](#commands) section for the full list.
 2. Select a PR from the list
 3. The plugin will:
    - Run `jj git fetch` for the PR's base and head branches
-   - Create a review change (described `pr-review #<N>: <head> -> <base>`) on top of the PR head
+   - Create a review change (described `pr-review #<N>: <head> -> <base>`) on the merge-base, with the PR head's files restored into it
    - Fetch all PR comments
    - Open the review buffer with all modified files
 
 There is no need to commit or stash anything first: jj always snapshots your work into its own change, so it is never touched by the review.
+
+The files on disk are exactly the PR head, but the review change's parent is the diff base (the merge-base). In a colocated jj + git repo, git's `HEAD` is therefore the diff base, so git tools show exactly the PR's changes (see [Viewing Diffs](#viewing-diffs)). The PR's commits are never the working copy, so local edits can't rewrite them: they go into the throwaway review change.
 
 ### Review Modes
 
@@ -309,7 +298,8 @@ There is no need to commit or stash anything first: jj always snapshots your wor
 The PR is checked out in a separate jj workspace:
 
 ```bash
-jj workspace add --name pr-<N> -r <pr head> -m "pr-review #<N>: <head> -> <base>" <path>
+jj workspace add --name pr-<N> -r <merge-base> -m "pr-review #<N>: <head> -> <base>" <path>
+jj restore --from <pr head>   # in the new workspace
 ```
 
 Neovim opens a **new tab** and `:tcd`s into the workspace. Your original checkout and your other tabs are left untouched (no LSP or file-watcher churn). The workspace path defaults to a sibling directory, `<repo_root>/../<repo-name>-pr-<number>`; override it with `workspace_path`. If a `pr-<N>` workspace already exists (e.g. a review that was never cleaned up) it is reused.
@@ -318,7 +308,7 @@ Tradeoff: files jj doesn't track (`node_modules`, `.env`, virtualenvs, ...) are 
 
 **Inplace mode (`review_mode = "inplace"`)**
 
-The plugin runs `jj new <pr head> -m "pr-review #<N>: ..."` in the current workspace and remembers the change you were on. On cleanup it goes back to that change with `jj edit` (or `jj new` on its parents if jj auto-abandoned it because it was empty). Your work in progress lives in its own change, so it is never touched.
+The plugin runs `jj new <merge-base> -m "pr-review #<N>: ..."` and `jj restore --from <pr head>` in the current workspace and remembers the change you were on. On cleanup it goes back to that change with `jj edit` (or `jj new` on its parents if jj auto-abandoned it because it was empty). Your work in progress lives in its own change, so it is never touched.
 
 ### Review Requests
 
@@ -359,11 +349,7 @@ Features:
 
 ### Navigating Changes
 
-The plugin includes built-in navigation that only works during PR review mode:
-
-**Hunk Navigation** (within a file):
-- `<C-j>` (default) - Jump to next hunk
-- `<C-k>` (default) - Jump to previous hunk
+The plugin includes built-in file navigation that only works during PR review mode (for hunks within a file, use your git tools - see [Viewing Diffs](#viewing-diffs)):
 
 **File Navigation** (between modified files):
 - `<C-l>` (default) - Go to next modified file
@@ -380,10 +366,12 @@ Instead of the whole PR at once, you can review it one commit at a time:
 - `<C-n>` / `<C-p>` (default) - Next / previous commit (from PR mode they start at the first / last commit)
 - `<C-b>` (default) - Switch the sidebar between the file list and the commit tree
 
-In commit mode the review change is moved on top of that commit (`jj new <commit>`), so the files on disk
-are exactly the commit's version and LSP, split view and inline diff work as usual. The diff is the
-commit's own change against its parent; merge commits are diffed against their auto-merged parents, so
-they only show conflict resolutions. The file list, file navigation and floats show the current commit.
+In commit mode the review change is recreated on the commit's parents with the commit's files restored
+into it (`jj new <parents>` + `jj restore --from <commit>`), so the files on disk are exactly the commit's
+version and git tools show only that commit's changes. Going back to the whole PR does the same with the
+merge-base and the PR head. Merge commits are listed against their auto-merged parents, so the file list
+only shows conflict resolutions, while git's `HEAD` is the first parent, so git tools show the merge
+against its first parent. The file list, file navigation and floats show the current commit.
 
 The commit sidebar shows the PR's commits (oldest first) with viewed progress; the current commit is
 expanded to its files. `<CR>` on a commit enters it (on the current one: fold/unfold), `<CR>` on a file
@@ -400,48 +388,48 @@ because a GitHub review is submitted against a single commit.
 
 Unsaved edits in review buffers are discarded when switching commits.
 
-### Split Diff View
+### Viewing Diffs
 
-Toggle between unified (inline) and split (side-by-side) diff view with `<C-v>` (default):
+The plugin doesn't draw diffs itself. Because git's `HEAD` in the review checkout is the diff base, your git tools show exactly the PR's changes (or the current commit's in commit mode):
 
-**Unified View (Default)**:
-- Shows changes inline with diff highlighting
-- Deleted lines appear as virtual text above changes
-- Added/modified lines highlighted in green
+- [gitsigns.nvim](https://github.com/lewis6991/gitsigns.nvim) - signs, `]c` / `[c` hunk navigation, `:Gitsigns preview_hunk`
+- [vim-fugitive](https://github.com/tpope/vim-fugitive) - `:Gvdiffsplit` for a side-by-side diff
+- `git diff HEAD` in a terminal
 
-**Split View**:
-- Left window: Base version (before changes)
-- Right window: Current version (after changes)
-- Both windows in diff mode with synchronized scrolling
-- No inline diff markers needed - native Vim diff highlighting
-
-The split view makes it easier to compare larger changes side-by-side. Press `<C-v>` again to return to unified view. The view mode persists as you navigate between files with `<C-l>`/`<C-h>`.
+This requires a colocated jj + git repo (workspace mode creates a git worktree for the review workspace when the repo is colocated). Deleted files can't be shown by git tools from the file list, so the plugin opens them as a read-only `<path> [DELETED]` buffer with the base content.
 
 ### Change Progress Indicator
 
-When reviewing a file with changes, you'll see three floating windows providing context:
+When reviewing a file of the PR, you'll see three floating windows providing context:
 
 ```
-┌──────────────────────────┐  ┌─────────────┐  ┌──────────────────┐
-│ ✓ Viewed                 │  │ +15 ~3 -8   │  │ <C-j> next hunk  │
-│ 2/5 changes              │  │ 💬 2 💭 1   │  │ <C-k> prev hunk  │
-│ <CR>: Mark as viewed     │  └─────────────┘  │ <C-v> split view │
-└──────────────────────────┘                   │ <C-r> hide floats│
-                                               └──────────────────┘
+┌──────────────────┐
+│ 📁 File 2/5      │
+└──────────────────┘
+┌──────────────────┐
+│ ✓ Viewed         │
+│ +15 ~3 -8        │
+│ 💬 2 comments    │
+└──────────────────┘
+┌──────────────────────┐
+│ <C-l>: Next file     │
+│ <C-h>: Prev file     │
+│ <CR>: Mark viewed    │
+│ <C-r>: Toggle floats │
+│ ...                  │
+└──────────────────────┘
 ```
 
-**Left Float (Progress)**:
+**General Float**:
+- **File position**: File x/total (plus Commit i/n in commit mode)
+
+**Buffer Float**:
 - **Viewed status**: Shows if the current file has been marked as viewed
-- **Change progress**: Current change position (groups consecutive changed lines together)
-- **Mark as viewed**: Press `<CR>` to mark file as viewed and jump to next file
-
-**Middle Float (Stats)**:
 - **Stats**: +additions ~modifications -deletions
-- **Comments**: 💬 Number of posted PR comments in this file
-- **Pending**: 💭 Number of pending comments you've drafted
+- **Comments**: 💬 Number of PR comments in this file
 
-**Right Float (Keymaps)**:
-- Shows available keyboard shortcuts for review mode
+**Keymaps Float**:
+- Shows available keyboard shortcuts for review mode (`<CR>` marks the file as viewed and jumps to the next file)
 
 **Toggle Floating Windows**:
 - Press `<C-r>` (default) to hide/show all three floating windows
@@ -516,24 +504,6 @@ To restore a session after restarting Neovim:
 In workspace mode, restoring a session reopens the review tab (`:tcd` into the workspace).
 
 Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
-
-### Inline Diff View
-
-When `show_inline_diff` is enabled, the plugin displays the diff directly in your buffer:
-
-- **Removed lines** appear as virtual text above the changed section (highlighted with `DiffDelete`)
-- **Added/modified lines** are highlighted with `DiffAdd` and marked with a `+` sign
-- This works **without gitsigns**, using native Neovim extmarks
-
-Example visualization:
-```
-  - old line that was removed
-  - another old line
-+ new line that replaced them
-+ another new line
-```
-
-Set `show_inline_diff = false` if you prefer to use gitsigns or another diff tool.
 
 ### Finishing the Review
 
@@ -662,35 +632,26 @@ require("github-pr-reviewer").setup({
 
 Telescope and fzf-lua provide enhanced comment browsing with file previews.
 
-### gitsigns.nvim (Optional)
+### gitsigns.nvim / vim-fugitive (Recommended)
 
-**gitsigns.nvim is optional** - the plugin has built-in inline diff visualization. However, gitsigns can still be useful for:
-
-- Hunk navigation with `]h` and `[h`
-- Interactive hunk staging/unstaging
-- Additional git blame and diff features
-
-**Note:** in a colocated jj + git repo, git's `HEAD` is the PR head, so gitsigns shows no PR hunks by default. Use the built-in inline diff to see the PR's changes.
-
-If you prefer to use gitsigns instead of the built-in inline diff:
+The plugin has no built-in diff view; gitsigns is the recommended way to see the PR's hunks. In a colocated jj + git repo, git's `HEAD` in the review checkout is the diff base (and the git index matches it), so with a default setup gitsigns shows exactly the PR's changes (or the current commit's in commit mode):
 
 ```lua
-require("github-pr-reviewer").setup({
-  show_inline_diff = false,  -- Disable built-in diff, use gitsigns instead
-})
-
 require("gitsigns").setup({
   -- your gitsigns config
 })
 
--- Navigation keymaps
-vim.keymap.set("n", "]h", function() require("gitsigns").next_hunk() end)
-vim.keymap.set("n", "[h", function() require("gitsigns").prev_hunk() end)
+-- Hunk navigation and preview
+vim.keymap.set("n", "]c", function() require("gitsigns").nav_hunk("next") end)
+vim.keymap.set("n", "[c", function() require("gitsigns").nav_hunk("prev") end)
+vim.keymap.set("n", "<leader>hp", function() require("gitsigns").preview_hunk() end)
 ```
+
+With vim-fugitive, `:Gvdiffsplit` shows the current file side by side with the diff base.
 
 ## How It Works
 
-1. **Starting review**: Runs `jj git fetch` (only the base branch from `origin` and the head branch from `origin` or the fork remote), then creates a review change on the PR head - in a new jj workspace (workspace mode) or with `jj new` in the current one (inplace mode). A review change is identified by its description starting with `pr-review #<N>`.
+1. **Starting review**: Runs `jj git fetch` (only the base branch from `origin` and the head branch from `origin` or the fork remote), then creates a review change on the merge-base and restores the PR head's files into it (`jj restore --from <pr head>`) - in a new jj workspace (workspace mode) or in the current one (inplace mode). Git's `HEAD` is thus the diff base, so git tools show the PR's changes. A review change is identified by its description starting with `pr-review #<N>`.
 
 2. **Fork support**: Automatically detects fork PRs using GitHub's `isCrossRepository` field, adds a `fork-<owner>` remote with `jj git remote add`, and fetches only the PR head branch from it.
 
@@ -698,9 +659,9 @@ vim.keymap.set("n", "[h", function() require("gitsigns").prev_hunk() end)
 
 4. **Pending comments**: Stored locally in session files (JSON format) and submitted to GitHub when you approve/request changes.
 
-5. **Change tracking**: Diffs are computed against the merge-base of the PR head and the base branch (`heads(::head & ::base@origin)`) - the same base GitHub's "Files changed" tab uses, so changes that only landed on the base branch don't show up. The file list comes from `jj diff --from <merge-base> --to @` (renames are shown as a delete + an add). Base file content comes from `jj file show -r <merge-base>`, and hunks are computed with `vim.diff` between that content and the file on disk.
+5. **Change tracking**: Diffs are computed against the merge-base of the PR head and the base branch (`heads(::head & ::base@origin)`) - the same base GitHub's "Files changed" tab uses, so changes that only landed on the base branch don't show up. The file list comes from `jj diff --from <merge-base> --to @` (renames are shown as a delete + an add). Base file content comes from `jj file show -r <merge-base>`, and changed lines are computed with `vim.diff` between that content and the file on disk (used for the sidebar stats, to check that line comments are on changed lines, and to jump to the first change when a file is opened).
 
-6. **Refresh**: `:PRRefresh` re-fetches, creates a new review change on the new PR head (in the same workspace in workspace mode) and abandons the old one. Local edits made in the review change are discarded.
+6. **Refresh**: `:PRRefresh` re-fetches, recreates the review change for the new PR head (in the same workspace in workspace mode) and abandons the old one. Local edits made in the review change are discarded.
 
 7. **Cleanup**: Abandons the review change and either removes the review workspace (workspace mode) or goes back to the change you were on (inplace mode).
 
