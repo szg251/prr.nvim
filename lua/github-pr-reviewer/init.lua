@@ -1,11 +1,13 @@
 local M = {}
 
 local github = require("github-pr-reviewer.github")
-local git = require("github-pr-reviewer.git")
+local jj = require("github-pr-reviewer.jj")
 local ui = require("github-pr-reviewer.ui")
 
 M.config = {
-  branch_prefix = "reviewing_",
+  review_mode = "workspace",      -- "workspace": review in a separate jj workspace opened in a new tab
+                                  -- "inplace": `jj new` the PR head in the current workspace
+  workspace_path = nil,           -- fun(repo_root, pr_number) -> path; default: <repo_root>/../<repo>-pr-<n>
   picker = "native",              -- "native", "fzf-lua", "telescope"
   open_files_on_review = true,    -- open modified files after starting review
   show_comments = true,           -- show PR comments in buffers during review
@@ -81,10 +83,44 @@ local function get_session_dir()
   return data_path .. "/github-pr-reviewer-sessions"
 end
 
+-- Root directory of the files under review (the review workspace in workspace mode)
+local function review_root()
+  return vim.g.pr_review_root or vim.fn.getcwd()
+end
+
+-- Absolute path of a PR file (paths in the PR are relative to the review root)
+local function review_path(path)
+  return review_root() .. "/" .. path
+end
+
+-- Store where the review lives and point jj at it
+-- state: { mode, root, main_root, workspace?, merge_base, review_change }
+local function set_review_location(state)
+  vim.g.pr_review_mode = state.mode
+  vim.g.pr_review_root = state.root
+  vim.g.pr_review_main_root = state.main_root
+  vim.g.pr_review_workspace = state.workspace
+  vim.g.pr_review_merge_base = state.merge_base
+  vim.g.pr_review_change = state.review_change
+  jj.cwd = state.root
+end
+
+-- Open a new tab whose working directory is the review workspace
+local function open_review_tab(root)
+  if M._review_tab and vim.api.nvim_tabpage_is_valid(M._review_tab) then
+    vim.api.nvim_set_current_tabpage(M._review_tab)
+  else
+    vim.cmd("tabnew")
+    M._review_tab = vim.api.nvim_get_current_tabpage()
+  end
+  vim.cmd("tcd " .. vim.fn.fnameescape(root))
+end
+
 local function get_session_file()
-  local cwd = vim.fn.getcwd()
-  -- Convert path to safe filename: /home/otavio/Projetos/api -> review_home_otavio_Projetos_api
-  local safe_name = cwd:gsub("^/", ""):gsub("/", "_")
+  -- Keyed by the shared jj repo, so the session is found from any workspace of the repo
+  local key = jj.repo_id() or vim.fn.getcwd()
+  -- Convert path to safe filename: /home/otavio/Projetos/api/.jj/repo -> review_home_otavio_Projetos_api_.jj_repo
+  local safe_name = key:gsub("^/", ""):gsub("/", "_")
   return get_session_dir() .. "/review_" .. safe_name .. ".json"
 end
 
@@ -99,12 +135,19 @@ local function save_session()
   local session_data = {
     pr_number = vim.g.pr_review_number,
     base_branch = vim.g.pr_review_base_branch,
-    previous_branch = vim.g.pr_review_previous_branch,
+    merge_base = vim.g.pr_review_merge_base,
+    review_change = vim.g.pr_review_change,
+    previous_change = vim.g.pr_review_previous_change,
     modified_files = vim.g.pr_review_modified_files,
     viewed_files = M._viewed_files,
     pending_comments = M._local_pending_comments,
     drafts = M._drafts,
     cwd = vim.fn.getcwd(),
+    repo_id = jj.repo_id(),
+    mode = vim.g.pr_review_mode,
+    root = vim.g.pr_review_root,
+    main_root = vim.g.pr_review_main_root,
+    workspace = vim.g.pr_review_workspace,
   }
 
   local session_file = get_session_file()
@@ -282,102 +325,64 @@ end
 
 -- Collect all files from PR with their metadata
 local function collect_pr_files(callback)
-  -- First get tracked changes (M, A, D)
-  -- Compare with the base branch of the PR, not HEAD
-  local base_branch = vim.g.pr_review_base_branch or "master"
-  local cmd = string.format("git diff --name-status origin/%s", base_branch)
-  vim.fn.jobstart(cmd, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      if not data then
-        vim.schedule(function()
-          callback({})
-        end)
-        return
-      end
+  jj.changed_files(vim.g.pr_review_merge_base, function(changed)
+    local files = {}
+    for _, f in ipairs(changed) do
+      table.insert(files, {
+        path = f.path,
+        status = f.status, -- M=modified, A=added, D=deleted
+        viewed = M._viewed_files[f.path] or false,
+        stats = { additions = 0, modifications = 0, deletions = 0 },
+      })
+    end
 
-      local files = {}
-      for _, line in ipairs(data) do
-        -- Format: M\tfile/path.txt or A\tfile/path.txt or D\tfile/path.txt
-        local status, path = line:match("^([AMD])%s+(.+)$")
-        if status and path then
-          table.insert(files, {
-            path = path,
-            status = status, -- M=modified, A=added, D=deleted
-            viewed = M._viewed_files[path] or false,
-            stats = { additions = 0, modifications = 0, deletions = 0 },
-          })
-        end
-      end
+    -- Now get stats for each file
+    local pending = #files
+    if pending == 0 then
+      vim.schedule(function()
+        callback(files)
+      end)
+      return
+    end
 
-      -- Now get untracked files
-      local untracked_cmd = "git ls-files --others --exclude-standard"
-      vim.fn.jobstart(untracked_cmd, {
-        stdout_buffered = true,
-        on_stdout = function(_, untracked_data)
-          if untracked_data then
-            for _, line in ipairs(untracked_data) do
-              if line and line ~= "" then
-                table.insert(files, {
-                  path = line,
-                  status = "N", -- new/untracked
-                  viewed = M._viewed_files[line] or false,
-                  stats = { additions = 0, modifications = 0, deletions = 0 },
-                })
-              end
+    for _, file in ipairs(files) do
+      get_inline_diff(file.path, file.status, function(hunks)
+        if hunks and #hunks > 0 then
+          local additions = 0
+          local deletions = 0
+          local modifications = 0
+
+          for _, hunk in ipairs(hunks) do
+            local added = #hunk.added_lines
+            local removed = #hunk.removed_lines
+
+            if added > 0 and removed > 0 then
+              modifications = modifications + math.min(added, removed)
+              additions = additions + math.max(0, added - removed)
+              deletions = deletions + math.max(0, removed - added)
+            elseif added > 0 then
+              additions = additions + added
+            elseif removed > 0 then
+              deletions = deletions + removed
             end
           end
 
-          -- Now get stats for each file
-          local pending = #files
-          if pending == 0 then
-            vim.schedule(function()
-              callback(files)
-            end)
-            return
-          end
+          file.stats = {
+            additions = additions,
+            modifications = modifications,
+            deletions = deletions,
+          }
+        end
 
-          for _, file in ipairs(files) do
-            get_inline_diff(file.path, file.status, function(hunks)
-              if hunks and #hunks > 0 then
-                local additions = 0
-                local deletions = 0
-                local modifications = 0
-
-                for _, hunk in ipairs(hunks) do
-                  local added = #hunk.added_lines
-                  local removed = #hunk.removed_lines
-
-                  if added > 0 and removed > 0 then
-                    modifications = modifications + math.min(added, removed)
-                    additions = additions + math.max(0, added - removed)
-                    deletions = deletions + math.max(0, removed - added)
-                  elseif added > 0 then
-                    additions = additions + added
-                  elseif removed > 0 then
-                    deletions = deletions + removed
-                  end
-                end
-
-                file.stats = {
-                  additions = additions,
-                  modifications = modifications,
-                  deletions = deletions,
-                }
-              end
-
-              pending = pending - 1
-              if pending == 0 then
-                vim.schedule(function()
-                  callback(files)
-                end)
-              end
-            end)
-          end
-        end,
-      })
-    end,
-  })
+        pending = pending - 1
+        if pending == 0 then
+          vim.schedule(function()
+            callback(files)
+          end)
+        end
+      end)
+    end
+  end)
 end
 
 local function get_relative_path(bufnr)
@@ -386,7 +391,7 @@ local function get_relative_path(bufnr)
   -- Remove [DELETED] suffix if present
   full_path = full_path:gsub(" %[DELETED%]$", "")
 
-  local cwd = vim.fn.getcwd()
+  local cwd = review_root()
   if full_path:sub(1, #cwd) == cwd then
     return full_path:sub(#cwd + 2)
   end
@@ -394,128 +399,103 @@ local function get_relative_path(bufnr)
 end
 
 local function get_changed_lines_for_file(file_path, status, callback)
-  local cmd
-  if status == "N" then
-    -- For new/untracked files, compare with /dev/null
-    cmd = string.format("git diff --unified=0 --no-index /dev/null -- %s", vim.fn.shellescape(file_path))
-  else
-    local merge_base = vim.g.pr_review_merge_base
-    local base_ref = merge_base and merge_base or "HEAD"
-    cmd = string.format("git diff --unified=0 %s -- %s", base_ref, vim.fn.shellescape(file_path))
-  end
-  vim.fn.jobstart(cmd, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      local all_lines = {}
-      if data then
-        for _, line in ipairs(data) do
-          local start_line, count = line:match("^@@%s+%-%d+[,%d]*%s+%+(%d+),?(%d*)%s+@@")
-          if start_line then
-            start_line = tonumber(start_line)
-            count = tonumber(count) or 1
-            if count == 0 then count = 1 end
-            for i = 0, count - 1 do
-              table.insert(all_lines, start_line + i)
-            end
+  jj.diff_file(vim.g.pr_review_merge_base, file_path, function(data)
+    local all_lines = {}
+    if data then
+      for _, line in ipairs(data) do
+        local start_line, count = line:match("^@@%s+%-%d+[,%d]*%s+%+(%d+),?(%d*)%s+@@")
+        if start_line then
+          start_line = tonumber(start_line)
+          count = tonumber(count) or 1
+          if count == 0 then count = 1 end
+          for i = 0, count - 1 do
+            table.insert(all_lines, start_line + i)
           end
         end
       end
+    end
 
-      table.sort(all_lines)
+    table.sort(all_lines)
 
-      local unique_lines = {}
-      local seen = {}
-      for _, l in ipairs(all_lines) do
-        if not seen[l] then
-          seen[l] = true
-          table.insert(unique_lines, l)
+    local unique_lines = {}
+    local seen = {}
+    for _, l in ipairs(all_lines) do
+      if not seen[l] then
+        seen[l] = true
+        table.insert(unique_lines, l)
+      end
+    end
+
+    local hunks = {}
+    if #unique_lines > 0 then
+      local current_hunk = { start_line = unique_lines[1], end_line = unique_lines[1] }
+      for i = 2, #unique_lines do
+        if unique_lines[i] == current_hunk.end_line + 1 then
+          current_hunk.end_line = unique_lines[i]
+        else
+          table.insert(hunks, current_hunk)
+          current_hunk = { start_line = unique_lines[i], end_line = unique_lines[i] }
         end
       end
+      table.insert(hunks, current_hunk)
+    end
 
-      local hunks = {}
-      if #unique_lines > 0 then
-        local current_hunk = { start_line = unique_lines[1], end_line = unique_lines[1] }
-        for i = 2, #unique_lines do
-          if unique_lines[i] == current_hunk.end_line + 1 then
-            current_hunk.end_line = unique_lines[i]
-          else
-            table.insert(hunks, current_hunk)
-            current_hunk = { start_line = unique_lines[i], end_line = unique_lines[i] }
-          end
-        end
-        table.insert(hunks, current_hunk)
-      end
-
-      vim.schedule(function()
-        callback(unique_lines, hunks)
-      end)
-    end,
-  })
+    vim.schedule(function()
+      callback(unique_lines, hunks)
+    end)
+  end)
 end
 
 -- Forward declaration
 local update_changes_float
 
 get_inline_diff = function(file_path, status, callback)
-  -- For new/untracked files, use a different command to get all lines
-  local cmd
-  if status == "A" or status == "N" then
-    cmd = string.format("git diff --unified=0 --no-index /dev/null -- %s", vim.fn.shellescape(file_path))
-  else
-    local merge_base = vim.g.pr_review_merge_base
-    local base_ref = merge_base and merge_base or "HEAD"
-    cmd = string.format("git diff --unified=0 %s -- %s", base_ref, vim.fn.shellescape(file_path))
-  end
+  jj.diff_file(vim.g.pr_review_merge_base, file_path, function(data)
+    if not data then
+      vim.schedule(function()
+        callback({})
+      end)
+      return
+    end
 
-  vim.fn.jobstart(cmd, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      if not data then
-        vim.schedule(function()
-          callback({})
-        end)
-        return
-      end
+    local hunks = {}
+    local current_hunk = nil
+    local in_hunk = false
 
-      local hunks = {}
-      local current_hunk = nil
-      local in_hunk = false
+    for _, line in ipairs(data) do
+      -- Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
+      local old_start, old_count, new_start, new_count = line:match("^@@%s+%-(%d+),?(%d*)%s+%+(%d+),?(%d*)%s+@@")
+      if old_start then
+        old_start = tonumber(old_start)
+        old_count = tonumber(old_count) or 1
+        new_start = tonumber(new_start)
+        new_count = tonumber(new_count) or 1
 
-      for _, line in ipairs(data) do
-        -- Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-        local old_start, old_count, new_start, new_count = line:match("^@@%s+%-(%d+),?(%d*)%s+%+(%d+),?(%d*)%s+@@")
-        if old_start then
-          old_start = tonumber(old_start)
-          old_count = tonumber(old_count) or 1
-          new_start = tonumber(new_start)
-          new_count = tonumber(new_count) or 1
-
-          current_hunk = {
-            old_start = old_start,
-            old_count = old_count,
-            new_start = new_start,
-            new_count = new_count,
-            removed_lines = {},
-            added_lines = {},
-          }
-          table.insert(hunks, current_hunk)
-          in_hunk = true
-        elseif in_hunk and current_hunk then
-          if line:match("^%-") and not line:match("^%-%-%- ") then
-            -- Removed line
-            table.insert(current_hunk.removed_lines, line:sub(2))
-          elseif line:match("^%+") and not line:match("^%+%+%+ ") then
-            -- Added line (current content)
-            table.insert(current_hunk.added_lines, line:sub(2))
-          end
+        current_hunk = {
+          old_start = old_start,
+          old_count = old_count,
+          new_start = new_start,
+          new_count = new_count,
+          removed_lines = {},
+          added_lines = {},
+        }
+        table.insert(hunks, current_hunk)
+        in_hunk = true
+      elseif in_hunk and current_hunk then
+        if line:match("^%-") and not line:match("^%-%-%- ") then
+          -- Removed line
+          table.insert(current_hunk.removed_lines, line:sub(2))
+        elseif line:match("^%+") and not line:match("^%+%+%+ ") then
+          -- Added line (current content)
+          table.insert(current_hunk.added_lines, line:sub(2))
         end
       end
+    end
 
-      vim.schedule(function()
-        callback(hunks)
-      end)
-    end,
-  })
+    vim.schedule(function()
+      callback(hunks)
+    end)
+  end)
 end
 
 -- Helper to get syntax-highlighted chunks for a line
@@ -658,7 +638,7 @@ local function create_split_view(current_bufnr, file_path)
   -- If we're in the review window, find the file window
   if M._review_window and current_win == M._review_window then
     -- Find a window with the current buffer
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       if vim.api.nvim_win_get_buf(win) == current_bufnr and win ~= M._review_window then
         vim.api.nvim_set_current_win(win)
         current_win = win
@@ -670,34 +650,23 @@ local function create_split_view(current_bufnr, file_path)
   -- Try to get base version of the file
   -- Build list of attempts to find the base version
   local base_branch = vim.g.pr_review_base_branch
-  local merge_base = vim.g.pr_review_merge_base
   local attempts = {}
 
   -- Prefer merge-base (exact common ancestor, matches GitHub's diff base)
-  if merge_base then
-    table.insert(attempts, string.format("%s:%s", merge_base, file_path))
+  if vim.g.pr_review_merge_base then
+    table.insert(attempts, vim.g.pr_review_merge_base)
   end
-
-  -- If we have base_branch, try it as fallback
   if base_branch then
-    table.insert(attempts, string.format("origin/%s:%s", base_branch, file_path))
-    table.insert(attempts, string.format("%s:%s", base_branch, file_path))
+    table.insert(attempts, string.format('remote_bookmarks(exact:"%s", exact:"origin")', base_branch))
   end
-
-  -- Fallback attempts
-  table.insert(attempts, string.format("origin/main:%s", file_path))
-  table.insert(attempts, string.format("origin/master:%s", file_path))
-  table.insert(attempts, string.format("main:%s", file_path))
-  table.insert(attempts, string.format("master:%s", file_path))
-  table.insert(attempts, string.format("HEAD~1:%s", file_path))
+  table.insert(attempts, "trunk()")
 
   local base_content
   local success = false
 
   for _, attempt in ipairs(attempts) do
-    local cmd = "git show " .. attempt
-    base_content = vim.fn.systemlist(cmd)
-    if vim.v.shell_error == 0 then
+    base_content = jj.file_lines_at(attempt, file_path)
+    if base_content then
       success = true
       debug_log("Split view: Using base from " .. attempt)
       break
@@ -796,7 +765,7 @@ local function restore_unified_view()
   -- Close left window (base version)
   -- Only close if it's not the last window
   if vim.api.nvim_win_is_valid(state.left_win) then
-    local win_count = #vim.api.nvim_list_wins()
+    local win_count = #vim.api.nvim_tabpage_list_wins(0)
     if win_count > 1 then
       pcall(vim.api.nvim_win_close, state.left_win, true)
     end
@@ -1137,7 +1106,7 @@ local function open_file_safe(file, split_cmd)
   if current_buf == M._review_buffer then
     -- Find a non-review window to use
     local found_window = false
-    for _, win in ipairs(vim.api.nvim_list_wins()) do
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local buf = vim.api.nvim_win_get_buf(win)
       if buf ~= M._review_buffer and vim.api.nvim_win_is_valid(win) then
         vim.api.nvim_set_current_win(win)
@@ -1149,7 +1118,7 @@ local function open_file_safe(file, split_cmd)
     -- If we didn't find another window, create a new split to the right
     if not found_window then
       -- Make sure we're in the review buffer window
-      for _, win in ipairs(vim.api.nvim_list_wins()) do
+      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
         if vim.api.nvim_win_get_buf(win) == M._review_buffer then
           vim.api.nvim_set_current_win(win)
           break
@@ -1185,50 +1154,38 @@ local function open_file_safe(file, split_cmd)
       -- Don't auto-mark as viewed - user should explicitly mark with mark_as_viewed_key
     else
       -- Open deleted file from merge_base (the PR's base commit, matching GitHub's view)
-      local del_ref = vim.g.pr_review_merge_base or "HEAD"
-      local cmd = string.format("git show %s:%s", del_ref, vim.fn.shellescape(file.path))
-      vim.fn.jobstart(cmd, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-          vim.schedule(function()
-            if not data or #data == 0 then
-              vim.notify("Could not load deleted file content", vim.log.levels.ERROR)
-              return
-            end
+      jj.file_lines_at_async(vim.g.pr_review_merge_base or "@-", file.path, function(data)
+        if not data or #data == 0 then
+          vim.notify("Could not load deleted file content", vim.log.levels.ERROR)
+          return
+        end
 
-            -- Filter empty last line if present
-            if data[#data] == "" then
-              table.remove(data, #data)
-            end
+        -- Create scratch buffer with old content
+        local buf = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, data)
+        vim.bo[buf].filetype = vim.filetype.match({ filename = file.path }) or ""
+        vim.bo[buf].buftype = "nofile"
+        vim.bo[buf].modifiable = false
+        vim.api.nvim_buf_set_name(buf, deleted_buf_name)
 
-            -- Create scratch buffer with old content
-            local buf = vim.api.nvim_create_buf(false, true)
-            vim.api.nvim_buf_set_lines(buf, 0, -1, false, data)
-            vim.bo[buf].filetype = vim.filetype.match({ filename = file.path }) or ""
-            vim.bo[buf].buftype = "nofile"
-            vim.bo[buf].modifiable = false
-            vim.api.nvim_buf_set_name(buf, deleted_buf_name)
+        -- Highlight all lines in red (deleted)
+        local deleted_ns = vim.api.nvim_create_namespace("pr_review_deleted_file")
+        local line_count = vim.api.nvim_buf_line_count(buf)
+        for i = 0, line_count - 1 do
+          vim.api.nvim_buf_set_extmark(buf, deleted_ns, i, 0, {
+            line_hl_group = "DiffDelete",
+            sign_text = "-",
+            sign_hl_group = "DiffDelete",
+          })
+        end
 
-            -- Highlight all lines in red (deleted)
-            local deleted_ns = vim.api.nvim_create_namespace("pr_review_deleted_file")
-            local line_count = vim.api.nvim_buf_line_count(buf)
-            for i = 0, line_count - 1 do
-              vim.api.nvim_buf_set_extmark(buf, deleted_ns, i, 0, {
-                line_hl_group = "DiffDelete",
-                sign_text = "-",
-                sign_hl_group = "DiffDelete",
-              })
-            end
-
-            vim.api.nvim_set_current_buf(buf)
-            -- Don't auto-mark as viewed - user should explicitly mark with mark_as_viewed_key
-          end)
-        end,
-      })
+        vim.api.nvim_set_current_buf(buf)
+        -- Don't auto-mark as viewed - user should explicitly mark with mark_as_viewed_key
+      end)
     end
   else
     -- Open normal file
-    vim.cmd("edit " .. vim.fn.fnameescape(vim.fn.getcwd() .. "/" .. file.path))
+    vim.cmd("edit " .. vim.fn.fnameescape(review_path(file.path)))
   end
 end
 
@@ -3818,7 +3775,7 @@ function M.list_pending_comments()
     -- Try to find buffer with this file
     local found_buf = nil
     for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf):match(file_path .. "$") then
+      if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) == review_path(file_path) then
         found_buf = buf
         break
       end
@@ -3835,7 +3792,7 @@ function M.list_pending_comments()
       end
     else
       -- Open the file
-      vim.cmd("edit " .. file_path)
+      vim.cmd("edit " .. vim.fn.fnameescape(review_path(file_path)))
     end
 
     -- Navigate to the line
@@ -3936,7 +3893,7 @@ function M.list_all_comments()
         if vim.api.nvim_buf_is_valid(buf) then
           local buf_name = vim.api.nvim_buf_get_name(buf)
           -- Make path relative to cwd
-          local cwd = vim.fn.getcwd()
+          local cwd = review_root()
           if buf_name:sub(1, #cwd) == cwd then
             buf_name = buf_name:sub(#cwd + 2)
           end
@@ -3958,7 +3915,7 @@ function M.list_all_comments()
         end
       else
         -- Open the file
-        vim.cmd("edit " .. file_path)
+        vim.cmd("edit " .. vim.fn.fnameescape(review_path(file_path)))
       end
 
       -- Navigate to the line
@@ -4533,7 +4490,11 @@ function M.show_session_info()
     table.insert(lines, "Saved session:")
     table.insert(lines, "  PR #" .. (session_data.pr_number or "nil"))
     table.insert(lines, "  Base branch: " .. (session_data.base_branch or "nil"))
-    table.insert(lines, "  Previous branch: " .. (session_data.previous_branch or "nil"))
+    table.insert(lines, "  Mode: " .. (session_data.mode or "nil"))
+    table.insert(lines, "  Review root: " .. (session_data.root or "nil"))
+    table.insert(lines, "  Merge base: " .. (session_data.merge_base or "nil"))
+    table.insert(lines, "  Review change: " .. (session_data.review_change or "nil"))
+    table.insert(lines, "  Previous change: " .. vim.inspect(session_data.previous_change))
     table.insert(lines, "  CWD: " .. (session_data.cwd or "nil"))
     table.insert(lines, "  Viewed files: " .. vim.inspect(session_data.viewed_files or {}))
     table.insert(lines, "  Pending comments: " .. #(session_data.pending_comments or {}))
@@ -4545,21 +4506,13 @@ function M.show_session_info()
   table.insert(lines, "Current state:")
   table.insert(lines, "  vim.g.pr_review_number: " .. vim.inspect(vim.g.pr_review_number))
   table.insert(lines, "  Current CWD: " .. vim.fn.getcwd())
-  table.insert(lines, "  Current branch: " .. (git.get_current_branch() or "nil"))
+  local current_change = jj.current_change()
+  table.insert(lines, "  Current change: " .. (current_change and current_change.change_id or "nil"))
 
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
 end
 
 function M.load_last_session()
-  -- Check if we're on a review branch
-  local current_branch = git.get_current_branch()
-  local on_review_branch = current_branch and current_branch:match("^" .. M.config.branch_prefix)
-
-  if not on_review_branch then
-    vim.notify("Not on a review branch. Use :PR to start a new review.", vim.log.levels.WARN)
-    return
-  end
-
   if vim.g.pr_review_number then
     vim.notify("Already in review mode.", vim.log.levels.INFO)
     -- Just open the review buffer
@@ -4574,9 +4527,16 @@ function M.load_last_session()
     return
   end
 
-  -- Verify we're in the same directory
-  if session_data.cwd ~= vim.fn.getcwd() then
-    vim.notify("Session is for a different directory: " .. session_data.cwd, vim.log.levels.WARN)
+  -- Verify the session belongs to this repository
+  if session_data.repo_id and session_data.repo_id ~= jj.repo_id() then
+    vim.notify("Session is for a different repository: " .. session_data.repo_id, vim.log.levels.WARN)
+    return
+  end
+
+  -- Check that the review change still exists where the session says it is
+  local root = session_data.root or vim.fn.getcwd()
+  if vim.fn.isdirectory(root) == 0 or not jj.current_review_pr(root) then
+    vim.notify("No review change found in " .. root .. ". Use :PR to start a new review.", vim.log.levels.WARN)
     return
   end
 
@@ -4585,7 +4545,18 @@ function M.load_last_session()
   -- Restore global state
   vim.g.pr_review_number = session_data.pr_number
   vim.g.pr_review_base_branch = session_data.base_branch
-  vim.g.pr_review_previous_branch = session_data.previous_branch
+  vim.g.pr_review_previous_change = session_data.previous_change
+  set_review_location({
+    mode = session_data.mode or "inplace",
+    root = root,
+    main_root = session_data.main_root,
+    workspace = session_data.workspace,
+    merge_base = session_data.merge_base,
+    review_change = session_data.review_change,
+  })
+  if session_data.mode == "workspace" and vim.fn.getcwd() ~= root then
+    open_review_tab(root)
+  end
   vim.g.pr_review_modified_files = session_data.modified_files
   M._viewed_files = session_data.viewed_files or {}
   M._local_pending_comments = session_data.pending_comments or {}
@@ -4915,16 +4886,6 @@ local function check_and_cleanup_if_needed(callback)
 end
 
 function M.list_review_requests()
-  -- Skip uncommitted changes check if already on a review branch
-  local current_branch = git.get_current_branch()
-  local on_review_branch = current_branch and current_branch:match("^" .. M.config.branch_prefix)
-
-  if not on_review_branch and git.has_uncommitted_changes() then
-    vim.notify("Cannot start review: you have uncommitted changes. Please commit or stash them first.",
-      vim.log.levels.ERROR)
-    return
-  end
-
   check_and_cleanup_if_needed(function()
     vim.notify("Fetching review requests...", vim.log.levels.INFO)
 
@@ -4966,11 +4927,6 @@ function M._start_review_for_pr(pr)
     return
   end
 
-  local current_branch = git.get_current_branch()
-  if current_branch then
-    vim.g.pr_review_previous_branch = current_branch
-  end
-
   vim.notify("Starting review for PR #" .. pr.number .. "...", vim.log.levels.INFO)
 
   -- For fork PRs, get the correct branch name using gh pr view
@@ -4997,71 +4953,68 @@ function M._start_review_for_pr(pr)
 end
 
 function M._do_start_review(pr)
-  -- Use head_label for fork PRs (includes owner:branch), replace : with -
-  local head_ref = (pr.head_label or pr.head_branch):gsub(":", "-")
-  local review_branch = string.format(
-    "%s%s_to_%s",
-    M.config.branch_prefix,
-    head_ref,
-    pr.base_branch
-  )
+  local mode = M.config.review_mode == "inplace" and "inplace" or "workspace"
 
-  git.fetch_all(function(fetch_ok, fetch_err)
-    if not fetch_ok then
-      vim.notify("Error fetching: " .. (fetch_err or "unknown"), vim.log.levels.ERROR)
+  -- Inplace: if we are already on a review change (e.g. continuing without cleanup), replace it
+  -- Otherwise remember where we were, to go back there on cleanup
+  local replace_change = nil
+  if mode == "inplace" then
+    local current = jj.current_change()
+    if jj.current_review_pr() then
+      replace_change = current and current.change_id
+    else
+      vim.g.pr_review_previous_change = current
+    end
+  end
+
+  local opts = { mode = mode }
+  if mode == "workspace" and M.config.workspace_path then
+    local main_root = jj.workspaces().default or jj.root()
+    opts.path = M.config.workspace_path(main_root, pr.number)
+  end
+
+  jj.checkout_pr(pr, replace_change, opts, function(ok, err, state)
+    if not ok then
+      vim.notify("Error starting review: " .. (err or "unknown"), vim.log.levels.ERROR)
       return
     end
 
-    git.create_review_branch(review_branch, pr.base_branch, function(ok, create_err)
-      if not ok then
-        vim.notify("Error creating branch: " .. (create_err or "unknown"), vim.log.levels.ERROR)
-        return
-      end
+    vim.g.pr_review_number = pr.number
+    vim.g.pr_review_base_branch = pr.base_branch
+    state.mode = mode
+    set_review_location(state)
+    if mode == "workspace" then
+      open_review_tab(state.root)
+    end
 
-      debug_log(string.format("Debug: About to merge - branch=%s, owner=%s, url=%s",
-        pr.head_branch or "nil",
-        pr.head_repo_owner or "nil",
-        pr.head_repo_url or "nil"))
-      git.soft_merge(pr.head_branch, pr.head_repo_owner, pr.head_repo_url, function(merge_ok, merge_err, merge_base)
-        if not merge_ok then
-          vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
-          return
-        end
+    -- Start polling for remote updates
+    start_update_polling()
 
-        vim.g.pr_review_number = pr.number
-        vim.g.pr_review_base_branch = pr.base_branch
-        vim.g.pr_review_merge_base = merge_base
+    vim.notify(
+      string.format("✅ Ready to review PR #%s: %s", pr.number, pr.title),
+      vim.log.levels.INFO
+    )
 
-        -- Start polling for remote updates
-        start_update_polling()
+    jj.get_modified_files_with_lines(state.merge_base, function(files)
+      if files and #files > 0 then
+        vim.g.pr_review_modified_files = vim.tbl_map(function(f)
+          return { path = f.path, status = f.status }
+        end, files)
 
-        vim.notify(
-          string.format("✅ Ready to review PR #%s: %s", pr.number, pr.title),
-          vim.log.levels.INFO
-        )
+        -- Save initial session
+        save_session()
 
-        git.get_modified_files_with_lines(function(files, hunks)
-          if files and #files > 0 then
-            vim.g.pr_review_modified_files = vim.tbl_map(function(f)
-              return { path = f.path, status = f.status }
-            end, files)
-
-            -- Save initial session
-            save_session()
-
-            -- Open review buffer and first file
-            M.open_review_buffer(function()
-              if M.config.open_files_on_review then
-                -- Use the ordered list (same order as ReviewBuffer)
-                local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
-                if first_file then
-                  open_file_safe(first_file, nil)
-                end
-              end
-            end)
+        -- Open review buffer and first file
+        M.open_review_buffer(function()
+          if M.config.open_files_on_review then
+            -- Use the ordered list (same order as ReviewBuffer)
+            local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
+            if first_file then
+              open_file_safe(first_file, nil)
+            end
           end
         end)
-      end)
+      end
     end)
   end)
 end
@@ -5075,7 +5028,7 @@ function M.setup(opts)
 
   vim.api.nvim_create_user_command("PRReviewCleanup", function()
     M.cleanup_review_branch()
-  end, { desc = "Cleanup review branch and return to previous branch" })
+  end, { desc = "Exit the review and clean up its jj workspace or change" })
 
   vim.api.nvim_create_user_command("PRInfo", function()
     M.show_pr_info()
@@ -5349,16 +5302,6 @@ function M.setup(opts)
 end
 
 function M.review_pr()
-  -- Skip uncommitted changes check if already on a review branch
-  local current_branch = git.get_current_branch()
-  local on_review_branch = current_branch and current_branch:match("^" .. M.config.branch_prefix)
-
-  if not on_review_branch and git.has_uncommitted_changes() then
-    vim.notify("Cannot start review: you have uncommitted changes. Please commit or stash them first.",
-      vim.log.levels.ERROR)
-    return
-  end
-
   check_and_cleanup_if_needed(function()
     local prs, err = github.list_open_prs()
     if err then
@@ -5376,11 +5319,6 @@ function M.review_pr()
         return
       end
 
-      local current_branch = git.get_current_branch()
-      if current_branch then
-        vim.g.pr_review_previous_branch = current_branch
-      end
-
       -- For fork PRs, get the correct branch name using gh pr view
       if pr.head_repo_owner then
         debug_log(string.format("Debug: Detected fork PR, owner=%s, getting details...", pr.head_repo_owner))
@@ -5396,83 +5334,13 @@ function M.review_pr()
           pr.head_branch = details.head_branch
           pr.head_label = details.head_label
 
-          debug_log("Debug: About to call _do_review_pr_with_branch")
-          M._do_review_pr_with_branch(pr)
+          debug_log("Debug: About to call _do_start_review")
+          M._do_start_review(pr)
         end)
       else
         debug_log("Debug: Not a fork PR, using branch as-is")
-        M._do_review_pr_with_branch(pr)
+        M._do_start_review(pr)
       end
-    end)
-  end)
-end
-
-function M._do_review_pr_with_branch(pr)
-  -- Use head_label for fork PRs (includes owner:branch), replace : with -
-  local head_ref = (pr.head_label or pr.head_branch):gsub(":", "-")
-  local review_branch = string.format(
-    "%s%s_to_%s",
-    M.config.branch_prefix,
-    head_ref,
-    pr.base_branch
-  )
-
-  git.fetch_all(function(fetch_ok, fetch_err)
-    if not fetch_ok then
-      vim.notify("Error fetching: " .. (fetch_err or "unknown"), vim.log.levels.ERROR)
-      return
-    end
-
-    git.create_review_branch(review_branch, pr.base_branch, function(ok, create_err)
-      if not ok then
-        vim.notify("Error creating branch: " .. (create_err or "unknown"), vim.log.levels.ERROR)
-        return
-      end
-
-      debug_log(string.format("Debug: About to merge - branch=%s, owner=%s, url=%s",
-        pr.head_branch or "nil",
-        pr.head_repo_owner or "nil",
-        pr.head_repo_url or "nil"))
-      git.soft_merge(pr.head_branch, pr.head_repo_owner, pr.head_repo_url, function(merge_ok, merge_err, merge_base)
-        if not merge_ok then
-          vim.notify("Error during soft merge: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
-          return
-        end
-
-        vim.g.pr_review_number = pr.number
-        vim.g.pr_review_base_branch = pr.base_branch
-        vim.g.pr_review_merge_base = merge_base
-
-        -- Start polling for remote updates
-        start_update_polling()
-
-        vim.notify(
-          string.format("✅ Ready to review PR #%s: %s", pr.number, pr.title),
-          vim.log.levels.INFO
-        )
-
-        git.get_modified_files_with_lines(function(files)
-          if files and #files > 0 then
-            vim.g.pr_review_modified_files = vim.tbl_map(function(f)
-              return { path = f.path, status = f.status }
-            end, files)
-
-            -- Save initial session
-            save_session()
-
-            -- Open review buffer and first file
-            M.open_review_buffer(function()
-              if M.config.open_files_on_review then
-                -- Use the ordered list (same order as ReviewBuffer)
-                local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
-                if first_file then
-                  open_file_safe(first_file, nil)
-                end
-              end
-            end)
-          end
-        end)
-      end)
     end)
   end)
 end
@@ -5493,130 +5361,149 @@ function M.refresh_pr_branch()
 
   vim.notify("Refreshing PR branch...", vim.log.levels.INFO)
 
-  -- Fetch latest changes from all remotes
-  git.fetch_all(function(fetch_ok, fetch_err)
-    if not fetch_ok then
-      vim.notify("❌ Failed to fetch: " .. (fetch_err or "unknown"), vim.log.levels.ERROR)
-      return
-    end
-
-    -- Get PR details including fork info
-    local cmd = string.format(
-      "gh pr view %d --json headRefName,headRepositoryOwner,headRepository,isCrossRepository",
-      pr_number
-    )
-    vim.fn.jobstart(cmd, {
-      stdout_buffered = true,
-      on_stdout = function(_, data)
-        if not data or not data[1] or data[1] == "" then
-          vim.schedule(function()
-            vim.notify("❌ Failed to get PR details", vim.log.levels.ERROR)
-          end)
-          return
-        end
-
-        local json_str = table.concat(data, "")
-        local ok, pr_info = pcall(vim.fn.json_decode, json_str)
-        if not ok or not pr_info then
-          vim.schedule(function()
-            vim.notify("❌ Failed to parse PR details", vim.log.levels.ERROR)
-          end)
-          return
-        end
-
+  -- Get PR details including fork info
+  local cmd = string.format(
+    "gh pr view %d --json headRefName,headRepositoryOwner,headRepository,isCrossRepository",
+    pr_number
+  )
+  vim.fn.jobstart(cmd, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if not data or not data[1] or data[1] == "" then
         vim.schedule(function()
-          local head_branch = pr_info.headRefName
-          local head_repo_owner = nil
-          local head_repo_url = nil
-
-          if pr_info.isCrossRepository and pr_info.headRepositoryOwner and pr_info.headRepository then
-            head_repo_owner = pr_info.headRepositoryOwner.login
-            head_repo_url = string.format("https://github.com/%s/%s.git",
-              head_repo_owner, pr_info.headRepository.name)
-          end
-
-          -- Reset to base branch (not the PR branch!) to reconstruct the soft merge state
-          local reset_cmd = string.format("git reset --hard origin/%s", base_branch)
-          vim.fn.jobstart(reset_cmd, {
-            on_exit = function(_, reset_code)
-              vim.schedule(function()
-                if reset_code ~= 0 then
-                  vim.notify("❌ Failed to reset to base branch", vim.log.levels.ERROR)
-                  return
-                end
-
-                -- Remove untracked files left by the previous soft merge
-                -- (git reset --hard only resets tracked files, not new untracked ones)
-                vim.fn.jobstart("git clean -fd", {
-                  on_exit = function()
-                    vim.schedule(function()
-                      -- Re-do the soft merge with the updated PR branch
-                      git.soft_merge(head_branch, head_repo_owner, head_repo_url, function(merge_ok, merge_err, merge_base)
-                        if not merge_ok then
-                          vim.notify("❌ Failed to re-merge PR: " .. (merge_err or "unknown"), vim.log.levels.ERROR)
-                          return
-                        end
-                        vim.g.pr_review_merge_base = merge_base
-
-                        -- Clear all cached data
-                        M._buffer_changes = {}
-                        M._buffer_hunks = {}
-                        M._buffer_comments = {}
-                        M._buffer_stats = {}
-                        M._buffer_jumped = {}
-
-                        -- Re-fetch modified files list
-                        git.get_modified_files_with_lines(function(files)
-                          vim.g.pr_review_modified_files = (files and #files > 0) and vim.tbl_map(function(f)
-                            return { path = f.path, status = f.status }
-                          end, files) or {}
-
-                          -- Reload current buffer
-                          vim.cmd("edit!")
-
-                          -- Reload review buffer with updated file list
-                          if M._review_buffer and vim.api.nvim_buf_is_valid(M._review_buffer) then
-                            M._review_files = {}
-                            M._review_files_ordered = {}
-                            M.open_review_buffer()
-                          end
-
-                          vim.notify("✅ PR refreshed successfully!", vim.log.levels.INFO)
-                        end)
-                      end)
-                    end)
-                  end,
-                })
-              end)
-            end,
-          })
+          vim.notify("❌ Failed to get PR details", vim.log.levels.ERROR)
         end)
-      end,
-    })
-  end)
+        return
+      end
+
+      local json_str = table.concat(data, "")
+      local ok, pr_info = pcall(vim.fn.json_decode, json_str)
+      if not ok or not pr_info then
+        vim.schedule(function()
+          vim.notify("❌ Failed to parse PR details", vim.log.levels.ERROR)
+        end)
+        return
+      end
+
+      vim.schedule(function()
+        local pr = {
+          number = pr_number,
+          head_branch = pr_info.headRefName,
+          base_branch = base_branch,
+        }
+
+        if pr_info.isCrossRepository and pr_info.headRepositoryOwner and pr_info.headRepository then
+          pr.head_repo_owner = pr_info.headRepositoryOwner.login
+          pr.head_repo_url = string.format("https://github.com/%s/%s.git",
+            pr.head_repo_owner, pr_info.headRepository.name)
+          pr.head_label = pr.head_repo_owner .. ":" .. pr.head_branch
+        end
+
+        -- Fetch and create a fresh review change on the new PR head, abandoning the old one
+        local replace_change = vim.g.pr_review_change
+        if not replace_change and jj.current_review_pr() then
+          local current = jj.current_change()
+          replace_change = current and current.change_id
+        end
+        local mode = vim.g.pr_review_mode or "inplace"
+        local opts = { mode = mode, path = vim.g.pr_review_root }
+        jj.checkout_pr(pr, replace_change, opts, function(checkout_ok, checkout_err, state)
+          if not checkout_ok then
+            vim.notify("❌ Failed to refresh PR: " .. (checkout_err or "unknown"), vim.log.levels.ERROR)
+            return
+          end
+          state.mode = mode
+          set_review_location(state)
+
+          -- Clear all cached data
+          M._buffer_changes = {}
+          M._buffer_hunks = {}
+          M._buffer_comments = {}
+          M._buffer_stats = {}
+          M._buffer_jumped = {}
+
+          -- Re-fetch modified files list
+          jj.get_modified_files_with_lines(state.merge_base, function(files)
+            vim.g.pr_review_modified_files = (files and #files > 0) and vim.tbl_map(function(f)
+              return { path = f.path, status = f.status }
+            end, files) or {}
+            save_session()
+
+            -- Reload current buffer
+            vim.cmd("edit!")
+
+            -- Reload review buffer with updated file list
+            if M._review_buffer and vim.api.nvim_buf_is_valid(M._review_buffer) then
+              M._review_files = {}
+              M._review_files_ordered = {}
+              M.open_review_buffer()
+            end
+
+            vim.notify("✅ PR refreshed successfully!", vim.log.levels.INFO)
+          end)
+        end)
+      end)
+    end,
+  })
 end
 
 function M.cleanup_review_branch()
-  local current = git.get_current_branch()
-  if not current or not current:match("^" .. M.config.branch_prefix) then
-    vim.notify("Not on a review branch", vim.log.levels.WARN)
+  if not jj.current_review_pr() then
+    vim.notify("Not on a review change", vim.log.levels.WARN)
     return
   end
 
   -- Confirm before exiting review
-  local choice = vim.fn.confirm("Exit review and cleanup branch?", "&Yes\n&No", 2)
+  local choice = vim.fn.confirm("Exit review and abandon the review change?", "&Yes\n&No", 2)
   if choice ~= 1 then
     return
   end
 
-  local target = vim.g.pr_review_previous_branch or "master"
+  local current = jj.current_change()
+  local cleanup_state = {
+    mode = vim.g.pr_review_mode or "inplace",
+    review_change = current and current.change_id,
+    previous = vim.g.pr_review_previous_change,
+    workspace = vim.g.pr_review_workspace,
+    main_root = vim.g.pr_review_main_root,
+  }
 
-  git.cleanup_review(current, target, function(ok, err)
+  if cleanup_state.mode == "workspace" then
+    -- Leave the workspace before it is deleted: wipe its buffers and close the review tab
+    local root = vim.g.pr_review_root
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      -- Deleting one buffer can wipe others (e.g. the review buffer), so re-check validity
+      local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
+      if root and name:sub(1, #root + 1) == root .. "/" then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end
+    end
+    if M._review_tab and vim.api.nvim_tabpage_is_valid(M._review_tab) and #vim.api.nvim_list_tabpages() > 1 then
+      vim.api.nvim_set_current_tabpage(M._review_tab)
+      vim.cmd("tabclose")
+    elseif cleanup_state.main_root then
+      vim.cmd("tcd " .. vim.fn.fnameescape(cleanup_state.main_root))
+    end
+    M._review_tab = nil
+    -- The review workspace is about to be deleted, run jj from the main workspace from now on
+    jj.cwd = cleanup_state.main_root
+  end
+
+  jj.cleanup_review(cleanup_state, function(ok, err, target)
     if ok then
       delete_session()
       stop_update_polling()
       vim.g.pr_review_number = nil
       vim.g.pr_review_base_branch = nil
+      vim.g.pr_review_merge_base = nil
+      vim.g.pr_review_change = nil
+      vim.g.pr_review_previous_change = nil
+      vim.g.pr_review_modified_files = nil
+      vim.g.pr_review_mode = nil
+      vim.g.pr_review_root = nil
+      vim.g.pr_review_main_root = nil
+      vim.g.pr_review_workspace = nil
+      jj.cwd = nil
       github.clear_cache()
       M._buffer_comments = {}
       M._buffer_changes = {}
@@ -5658,7 +5545,7 @@ function M.cleanup_review_branch()
         end
       end
 
-      vim.notify("Cleaned up review branch, back on: " .. target, vim.log.levels.INFO)
+      vim.notify("Cleaned up review change, back on: " .. target, vim.log.levels.INFO)
     else
       vim.notify("Error cleaning up: " .. (err or "unknown"), vim.log.levels.ERROR)
     end

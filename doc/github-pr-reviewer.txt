@@ -49,7 +49,8 @@ to review it.
 
 • Neovim >= 0.11.0
 • GitHub CLI (`gh`) installed and authenticated
-• Git
+• jj (Jujutsu) - the repository must be a jj repo (a colocated jj + git
+  repo is fine)
 • Optional: bat for syntax-highlighted previews in fzf-lua
 
 ==============================================================================
@@ -80,14 +81,17 @@ After installation, run `:helptags ALL` to generate help tags.
 ==============================================================================
 4. QUICK START                                      *github-pr-reviewer-quickstart*
 
-1. Make sure you have no uncommitted changes
-2. Run |:PRListReviewRequests| to see PRs requesting your review
-3. Select a PR to review
-4. Use |:PRReviewBuffer| to see all changed files
-5. Navigate with LSP (gd, gr, K) and your favorite tools
-6. Add pending comments with |:PRPendingComment|
-7. Approve with |:PRApprove| or request changes with |:PRRequestChanges|
-8. Clean up with |:PRReviewCleanup|
+1. Run |:PRListReviewRequests| to see PRs requesting your review
+2. Select a PR to review (it opens in a new tab, see
+   |github-pr-reviewer-review-modes|)
+3. Use |:PRReviewBuffer| to see all changed files
+4. Navigate with LSP (gd, gr, K) and your favorite tools
+5. Add pending comments with |:PRPendingComment|
+6. Approve with |:PRApprove| or request changes with |:PRRequestChanges|
+7. Clean up with |:PRReviewCleanup|
+
+No need to commit or stash anything first: jj always snapshots your work
+into its own change, which the review never touches.
 
 ==============================================================================
 5. COMMANDS                                          *github-pr-reviewer-commands*
@@ -105,18 +109,28 @@ MAIN MENU~
 REVIEW WORKFLOW~
                                                      *:PRReview*
 :PRReview               Select and start reviewing a PR from the list of
-                        open PRs. Creates a review branch and soft-merges
-                        the PR changes as unstaged modifications.
+                        open PRs. Fetches the PR with `jj git fetch` and
+                        creates a review change on the PR head (see
+                        |github-pr-reviewer-review-modes|).
 
                                                      *:PRListReviewRequests*
 :PRListReviewRequests   List PRs where you are requested as a reviewer.
                         Shows viewed status and allows marking PRs as
                         viewed without starting a review.
 
+                                                     *:PRRefresh*
+:PRRefresh              Re-fetch the PR and create a new review change on
+                        the new PR head (in the same workspace in
+                        workspace mode), abandoning the old one. Local
+                        edits made in the review change are discarded.
+
                                                      *:PRReviewCleanup*
-:PRReviewCleanup        End the current review. Reverts all PR changes,
-                        deletes the review branch, returns to your
-                        original branch, and clears the session.
+:PRReviewCleanup        End the current review. In workspace mode, wipes
+                        the workspace's buffers, closes the review tab
+                        and runs `jj workspace remove pr-<N>`. In inplace
+                        mode, returns to the change you were on. In both
+                        modes, abandons the review change and clears the
+                        session.
 
                                                      *:PRInfo*
 :PRInfo                 Show PR information including stats, reviews,
@@ -128,9 +142,10 @@ REVIEW WORKFLOW~
 
                                                      *:PRLoadLastSession*
 :PRLoadLastSession      Restore the last PR review session after
-                        restarting Neovim. Restores PR number, branch,
-                        modified files, viewed status, and pending
-                        comments.
+                        restarting Neovim. Restores PR number, review
+                        location, modified files, viewed status, and
+                        pending comments. In workspace mode, reopens the
+                        review tab.
 
                                                      *:PRReviewBuffer*
 :PRReviewBuffer         Toggle the review buffer (interactive file
@@ -201,8 +216,12 @@ REVIEW ACTIONS~
 Configure the plugin by calling the setup function: >lua
 
     require("github-pr-reviewer").setup({
-      -- Prefix for review branches
-      branch_prefix = "reviewing_",
+      -- "workspace": review in a separate jj workspace in a new tab
+      -- "inplace": `jj new` the PR head in the current workspace
+      review_mode = "workspace",
+
+      -- fun(repo_root, pr_number) -> path for the review workspace
+      workspace_path = nil,
 
       -- Picker: "native", "fzf-lua", or "telescope"
       picker = "native",
@@ -246,10 +265,21 @@ Configure the plugin by calling the setup function: >lua
 <
 
 OPTIONS~
-                                                     *github-pr-reviewer.branch_prefix*
-branch_prefix           (string, default: "reviewing_")
-                        Prefix for review branches. Review branches are
-                        named as: `{prefix}{head_branch}_to_{base_branch}`
+                                                     *github-pr-reviewer.review_mode*
+review_mode             (string, default: "workspace")
+                        Where the review happens. Options:
+                        "workspace" - separate jj workspace opened in a
+                                      new tab
+                        "inplace"   - `jj new <pr head>` in the current
+                                      workspace
+                        See |github-pr-reviewer-review-modes|.
+
+                                                     *github-pr-reviewer.workspace_path*
+workspace_path          (function|nil, default: nil)
+                        `function(repo_root, pr_number) -> path` for the
+                        review workspace (workspace mode only). Default:
+                        sibling directory
+                        `<repo_root>/../<repo-name>-pr-<number>`
 
                                                      *github-pr-reviewer.picker*
 picker                  (string, default: "native")
@@ -346,6 +376,38 @@ BASIC REVIEW WORKFLOW~
 8. Clean up: >vim
     :PRReviewCleanup
 <
+
+REVIEW MODES~
+                                                     *github-pr-reviewer-review-modes*
+
+Starting a review runs `jj git fetch` (only the base branch from origin and
+the head branch from origin or the fork remote) and creates a review
+change, whose description starts with `pr-review #<N>`.
+
+Workspace mode (default, `review_mode = "workspace"`): >bash
+    jj workspace add --name pr-<N> -r <pr head> \
+      -m "pr-review #<N>: <head> -> <base>" <path>
+<
+Neovim opens a new tab and |:tcd|s into the workspace. Your original
+checkout and other tabs are untouched (no LSP/watcher churn). An existing
+`pr-<N>` workspace is reused (refresh, or a review never cleaned up).
+Files jj doesn't track (node_modules, .env, virtualenvs) are not present
+in the new workspace, so LSP/builds may not work there; use inplace mode
+if you need them.
+
+If you start a new review choosing "continue without cleanup", the old
+workspace stays on disk. Remove it with `jj workspace remove pr-<N>`.
+
+Inplace mode (`review_mode = "inplace"`): runs
+`jj new <pr head> -m "pr-review #<N>: ..."` in the current workspace and
+remembers the change you were on. Cleanup goes back to it with `jj edit`
+(or `jj new` on its parents if jj auto-abandoned it because it was empty).
+Your work in progress lives in its own change, so it is never touched.
+
+Diffs are computed against the merge-base of the PR head and the base
+branch (`heads(::head & ::base@origin)`), the same base GitHub's "Files
+changed" uses, so base-only changes don't show up. Renames are shown as a
+delete + an add.
 
 PENDING COMMENTS WORKFLOW~
                                                      *github-pr-reviewer-pending-comments*
@@ -450,14 +512,17 @@ SESSION PERSISTENCE~
 The plugin automatically saves your review session state:
 
 • Auto-save: Session is saved when you start a review
-• Per-project: Each project directory gets its own session file
-• What's saved: PR number, previous branch, modified files, viewed
-  status, and pending comments
+• Per-repository: Keyed by the shared jj repo store (`<root>/.jj/repo`),
+  so a session is found from any workspace of the repo
+• What's saved: PR number, review mode, review root, main root,
+  workspace name, merge base, review change, previous change, modified
+  files, viewed status, and pending comments
 • Auto-cleanup: Session file is deleted when you run |:PRReviewCleanup|
 
 Restore a session after restarting Neovim: >vim
     :PRLoadLastSession
 <
+In workspace mode this reopens the review tab (|:tcd| into the workspace).
 
 Session files are stored in:
     ~/.local/share/nvim/github-pr-reviewer-sessions/
@@ -581,6 +646,10 @@ visualization. However, gitsigns can still be useful for:
 • Interactive hunk staging/unstaging
 • Additional git blame and diff features
 
+Note: in a colocated jj + git repo, git HEAD is the PR head, so gitsigns
+shows no PR hunks by default. Use the built-in inline diff to see the PR's
+changes.
+
 To use gitsigns instead of built-in inline diff: >lua
 
     require("github-pr-reviewer").setup({
@@ -595,19 +664,10 @@ To use gitsigns instead of built-in inline diff: >lua
 ==============================================================================
 10. TROUBLESHOOTING                          *github-pr-reviewer-troubleshooting*
 
-CANNOT START REVIEW: YOU HAVE UNCOMMITTED CHANGES~
+NOT ON A REVIEW CHANGE~
 
-Commit or stash your changes before starting a review: >bash
-
-    git stash
-    # or
-    git commit -am "WIP"
-<
-
-NOT ON A REVIEW BRANCH~
-
-You can only run |:PRReviewCleanup| when on a review branch (prefixed with
-`reviewing_` by default).
+You can only run |:PRReviewCleanup| while in a review, i.e. when the
+current change's description starts with `pr-review #<N>`.
 
 COMMENTS NOT SHOWING~
 
@@ -625,16 +685,22 @@ Ensure GitHub CLI is properly authenticated: >bash
     gh auth login  # if not authenticated
 <
 
-GIT FETCH FAILED~
+FETCH FAILED~
 
-If you see this error, you might have old fork remotes that are no longer
-accessible. Clean them up: >bash
+If `jj git fetch` fails, you might have old fork remotes that are no
+longer accessible. Clean them up: >bash
 
-    git remote | grep "^fork-" | xargs -I {} git remote remove {}
+    jj git remote list
+    jj git remote remove fork-<owner>
 <
 
-The plugin has a fallback that tries `git fetch origin` if
-`git fetch --all` fails.
+LEFTOVER REVIEW WORKSPACES~
+
+A review that was never cleaned up leaves its workspace on disk: >bash
+
+    jj workspace list
+    jj workspace remove pr-<N>
+<
 
 PREVIEW NOT WORKING IN FZF-LUA~
 

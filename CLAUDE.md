@@ -14,11 +14,12 @@ Neovim/Lua plugin for reviewing GitHub Pull Requests directly in the editor, wit
 ## Main Architecture
 
 ### Main File
-- **`lua/github-pr-reviewer/init.lua`** (~4400 lines): Contains all plugin logic
+- **`lua/github-pr-reviewer/init.lua`** (~5800 lines): Contains all plugin logic
 
 ### Auxiliary Modules
 - **`lua/github-pr-reviewer/github.lua`**: GitHub GraphQL API interaction
 - **`lua/github-pr-reviewer/ui.lua`**: UI components (pickers, menus)
+- **`lua/github-pr-reviewer/jj.lua`**: jj (Jujutsu) interaction - fetch, review workspace/change creation, cleanup, changed files, base content (replaces the old `git.lua`)
 
 ## Important Concepts
 
@@ -34,7 +35,7 @@ Neovim/Lua plugin for reviewing GitHub Pull Requests directly in the editor, wit
 
 #### Split Mode (Side-by-Side)
 - **Two buffers side by side**:
-  - Left: `[BEFORE] filename` (git base version)
+  - Left: `[BEFORE] filename` (base version, from the merge-base)
   - Right: Current file (PR version)
 - **Uses Vim's native diff mode**: `diffthis`, `diffoff`, `diffupdate`
 - **CRITICAL**: Do NOT add extmarks/visual indicators when in split mode!
@@ -45,7 +46,7 @@ Neovim/Lua plugin for reviewing GitHub Pull Requests directly in the editor, wit
 ### 2. Buffer System
 
 #### Special Buffers
-- **`[BEFORE] <path>`**: Read-only buffer with git base content
+- **`[BEFORE] <path>`**: Read-only buffer with base content (from the merge-base)
 - **Review Buffer**: Special buffer with list of modified files
 
 #### Buffer State Tracking
@@ -200,9 +201,14 @@ end
 ```
 User: :PR <number>
   ↓
-fetch_pr_changes() (github.lua)
+M._start_review_for_pr(pr) → M._do_start_review(pr)
   ↓
-M.start_review()
+jj.checkout_pr()   # jj git fetch + workspace add / jj new
+  ↓
+set_review_location(state)  # vim.g.pr_review_root, jj.cwd, ...
+open_review_tab(root)       # workspace mode only (tabnew + tcd)
+  ↓
+jj.get_modified_files_with_lines(merge_base)
   ↓
 - Create review buffer with file list
 - Populate M._review_files
@@ -237,7 +243,7 @@ M.toggle_diff_view()
 M._diff_view_mode = "split"
 create_split_view(bufnr, file_path)
   ↓
-1. Fetch base content: git show origin/base:file
+1. Fetch base content: jj file show -r <merge-base> (fallbacks: base@origin, trunk())
 2. Create [BEFORE] buffer with base content
 3. Create left window with [BEFORE] buffer
 4. Get right window (current file)
@@ -288,25 +294,47 @@ update_changes_float()
 close_float_wins()
 ```
 
-## Git Integration
+## jj Integration
+
+All VCS work goes through `jj.lua`; there are no git commands, branches, stashes or uncommitted-changes checks (jj snapshots the user's work into its own change).
+
+### Review Model
+
+A **review change** is a change whose description starts with `pr-review #<N>` (`jj.current_review_pr()` detects it). `M.config.review_mode` picks where it lives:
+
+- **`"workspace"` (default)**: `jj workspace add --name pr-<N> -r <pr head> -m "pr-review #<N>: <head> -> <base>" <path>` (path from `M.config.workspace_path` or `<repo_root>/../<repo>-pr-<N>`). The review opens in its own tab (`open_review_tab()`: `tabnew` + `tcd`). An existing `pr-<N>` workspace is reused. Cleanup wipes the workspace's buffers, closes the tab, runs `jj workspace remove pr-<N>` and abandons the review change.
+- **`"inplace"`**: `jj new <pr head> -m "pr-review #<N>: ..."` in the current workspace; the previous change is kept in `vim.g.pr_review_previous_change`. Cleanup does `jj edit` back to it (or `jj new` on its parents if it was auto-abandoned) and abandons the review change.
+
+Fetching: `jj git fetch` only the base branch from `origin` and the head branch from `origin` or a `fork-<owner>` remote (added with `jj git remote add` for fork PRs).
+
+`M.refresh_pr_branch()` re-fetches, creates a new review change on the new head (same workspace in workspace mode) and abandons the old one.
+
+### Review Location (paths and cwd)
+
+- `set_review_location(state)` stores `vim.g.pr_review_mode/root/main_root/workspace/merge_base/change` and sets **`jj.cwd = state.root`**, so every jj command runs in the review root.
+- **`review_root()` / `review_path(path)`** (init.lua) build PR file paths from `vim.g.pr_review_root`, NOT `vim.fn.getcwd()`. Always use them for PR file paths - the cwd is not the review root outside the review tab.
+- Sessions are keyed by the shared repo store (`<root>/.jj/repo`, resolved), so a session is found from any workspace.
+
+### Diff Base (merge-base)
+
+Diffs are against the merge-base of the PR head and the base branch: `heads(::head & ::base@origin)` (same base as GitHub's "Files changed"; base-only changes don't show). Stored in `vim.g.pr_review_merge_base`.
+
+- **File list**: `jj diff --from <merge-base> --to @` with a template. Renames appear as delete + add; there is no "untracked" status.
+- **Hunks**: `vim.diff` (xdiff, git-compatible unified format, 0 context) between base content and the file on disk.
 
 ### Fetching Base Content
 
-Tries multiple refs in order:
+`jj file show -r <rev> <file>`. Split view tries in order:
 ```lua
-1. origin/{base_branch}:{file}
-2. {base_branch}:{file}
-3. origin/main:{file}
-4. origin/master:{file}
-5. main:{file}
-6. master:{file}
-7. HEAD~1:{file}
+1. <merge-base>
+2. base@origin   -- remote_bookmarks(exact:"<base>", exact:"origin")
+3. trunk()
 ```
 
 ### Archived Files (Deleted)
 
 Status "D" (deleted):
-- Fetch from `HEAD:{file}` (version before deletion)
+- Fetch from the merge-base (version before deletion)
 - Read-only buffer
 - All lines with DiffDelete highlight
 
@@ -465,6 +493,19 @@ Defined in setup:
    end
    ```
 
+5. **Iterate windows of all tabs (`nvim_list_wins()`)**
+   ```lua
+   -- WRONG:
+   for _, win in ipairs(vim.api.nvim_list_wins()) do ...
+
+   -- RIGHT (the review lives in its own tab in workspace mode):
+   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do ...
+   ```
+
+6. **Build PR file paths from getcwd()** - use `review_path(path)` / `review_root()`.
+
+7. **Run mutating jj commands in parallel** - only read-only jj commands (`jj file show`, `jj log`, ...) may run concurrently, and they must pass `--ignore-working-copy` so they don't snapshot the working copy or race on it.
+
 ### ✅ ALWAYS DO
 
 1. **Clear namespaces before creating splits**
@@ -472,6 +513,7 @@ Defined in setup:
 3. **Use defer_fn after layout operations**
 4. **Reset M._diff_view_mode correctly**
 5. **Test with new (A), deleted (D), and modified (M) files**
+6. **Test both `review_mode = "workspace"` and `"inplace"`**
 
 ## Performance
 
@@ -485,7 +527,7 @@ Defined in setup:
 ### Areas for Improvement
 
 - Load comments lazily (only when needed)
-- Cache git show results
+- Cache `jj file show` results
 - Debounce update_changes_float on CursorMoved
 
 ## Contributing

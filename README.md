@@ -26,7 +26,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 ## Features
 
 ### Core Review Features
-- ✅ **Review PRs locally** - Checkout PR changes as unstaged modifications
+- ✅ **Review PRs locally** - Check out the PR in its own jj workspace (or change)
 - ✅ **Session persistence** - Resume reviews after restarting Neovim
 - ✅ **Fork PR support** - Automatically handles PRs from forks
 - ✅ **Review requests** - List PRs where you're requested as reviewer
@@ -62,7 +62,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 
 - Neovim >= 0.11.0
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated
-- Git
+- [jj (Jujutsu)](https://github.com/jj-vcs/jj) - the repository must be a jj repo (a colocated jj + git repo is fine)
 - Optional: [bat](https://github.com/sharkdp/bat) for syntax-highlighted previews in fzf-lua
 
 ## Installation
@@ -116,8 +116,14 @@ EOF
 
 ```lua
 require("github-pr-reviewer").setup({
-  -- Prefix for review branches (default: "reviewing_")
-  branch_prefix = "reviewing_",
+  -- Where to review: "workspace" (default) checks the PR out in a separate jj
+  -- workspace opened in a new tab; "inplace" runs `jj new <pr head>` in the
+  -- current workspace
+  review_mode = "workspace",
+
+  -- Optional function(repo_root, pr_number) -> path for the review workspace
+  -- (default: <repo_root>/../<repo-name>-pr-<number>)
+  workspace_path = nil,
 
   -- Picker for PR selection: "native", "fzf-lua", or "telescope"
   picker = "native",
@@ -177,7 +183,8 @@ require("github-pr-reviewer").setup({
 |---------|-------------|
 | `:PRReview` | Select and start reviewing a PR |
 | `:PRListReviewRequests` | List PRs where you are requested as reviewer |
-| `:PRReviewCleanup` | End review, clean up changes, return to previous branch |
+| `:PRRefresh` | Fetch the latest PR head and recreate the review change on it |
+| `:PRReviewCleanup` | End review, abandon the review change, remove the review workspace (or return to your previous change) |
 | `:PRInfo` | Show PR information (stats, reviews, merge status) |
 | `:PROpen` | Open PR in browser |
 | `:PRLoadLastSession` | Restore last PR review session (after restarting Neovim) |
@@ -261,7 +268,7 @@ From the menu, press:
    :PR
    " Press 'a' to approve (submits all pending comments)
    " Or press 'x' to request changes
-   " Then press 'c' to cleanup and return to your branch
+   " Then press 'c' to cleanup and return to your work
    ```
 
 ### Alternative: Direct Commands
@@ -279,15 +286,33 @@ See the [Commands](#commands) section for the full list.
 
 ### Starting a Review
 
-1. Make sure you have no uncommitted changes (the plugin will warn you)
-2. Run `:PRListReviewRequests` to see PRs requesting your review, or `:PRReview` for all open PRs
-3. Select a PR from the list
-4. The plugin will:
-   - Save your current branch
-   - Create a review branch
-   - Soft-merge the PR changes (unstaged)
+1. Run `:PRListReviewRequests` to see PRs requesting your review, or `:PRReview` for all open PRs
+2. Select a PR from the list
+3. The plugin will:
+   - Run `jj git fetch` for the PR's base and head branches
+   - Create a review change (described `pr-review #<N>: <head> -> <base>`) on top of the PR head
    - Fetch all PR comments
    - Open the review buffer with all modified files
+
+There is no need to commit or stash anything first: jj always snapshots your work into its own change, so it is never touched by the review.
+
+### Review Modes
+
+**Workspace mode (default, `review_mode = "workspace"`)**
+
+The PR is checked out in a separate jj workspace:
+
+```bash
+jj workspace add --name pr-<N> -r <pr head> -m "pr-review #<N>: <head> -> <base>" <path>
+```
+
+Neovim opens a **new tab** and `:tcd`s into the workspace. Your original checkout and your other tabs are left untouched (no LSP or file-watcher churn). The workspace path defaults to a sibling directory, `<repo_root>/../<repo-name>-pr-<number>`; override it with `workspace_path`. If a `pr-<N>` workspace already exists (e.g. a review that was never cleaned up) it is reused.
+
+Tradeoff: files jj doesn't track (`node_modules`, `.env`, virtualenvs, ...) are not present in the new workspace, so LSP or builds may not work there. Use inplace mode if you need them.
+
+**Inplace mode (`review_mode = "inplace"`)**
+
+The plugin runs `jj new <pr head> -m "pr-review #<N>: ..."` in the current workspace and remembers the change you were on. On cleanup it goes back to that change with `jj edit` (or `jj new` on its parents if jj auto-abandoned it because it was empty). Your work in progress lives in its own change, so it is never touched.
 
 ### Review Requests
 
@@ -444,8 +469,8 @@ Benefits:
 The plugin automatically saves your review session state:
 
 - **Auto-save**: Session is saved when you start a review
-- **Per-project**: Each project directory gets its own session file
-- **What's saved**: PR number, previous branch, modified files, viewed status, pending comments
+- **Per-repository**: Sessions are keyed by the shared jj repo store (`<root>/.jj/repo`), so a session is found from any workspace of the repo
+- **What's saved**: PR number, review mode, review root, main root, workspace name, merge base, review change, previous change, modified files, viewed status, pending comments
 - **Auto-cleanup**: Session file is deleted when you run `:PRReviewCleanup`
 
 To restore a session after restarting Neovim:
@@ -453,6 +478,8 @@ To restore a session after restarting Neovim:
 ```vim
 :PRLoadLastSession
 ```
+
+In workspace mode, restoring a session reopens the review tab (`:tcd` into the workspace).
 
 Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
 
@@ -480,10 +507,12 @@ Set `show_inline_diff = false` if you prefer to use gitsigns or another diff too
    - If you have pending comments, they'll be shown for confirmation
    - All pending comments are submitted with your review
 2. Run `:PRReviewCleanup` to:
-   - Revert all PR changes
-   - Delete the review branch
-   - Return to your original branch
+   - **Workspace mode**: wipe the workspace's buffers, close the review tab and run `jj workspace remove pr-<N>` (deletes the directory and its git worktree)
+   - **Inplace mode**: return to the change you were on before the review
+   - Abandon the review change
    - Clear the session
+
+If you start a new review and choose "continue without cleanup", the old workspace stays on disk. Remove it with `jj workspace remove pr-<N>`.
 
 ## Complete Workflow Example
 
@@ -607,6 +636,8 @@ Telescope and fzf-lua provide enhanced comment browsing with file previews.
 - Interactive hunk staging/unstaging
 - Additional git blame and diff features
 
+**Note:** in a colocated jj + git repo, git's `HEAD` is the PR head, so gitsigns shows no PR hunks by default. Use the built-in inline diff to see the PR's changes.
+
 If you prefer to use gitsigns instead of the built-in inline diff:
 
 ```lua
@@ -625,33 +656,25 @@ vim.keymap.set("n", "[h", function() require("gitsigns").prev_hunk() end)
 
 ## How It Works
 
-1. **Starting review**: Creates a branch from the PR's base branch, then soft-merges the PR's head branch without committing. This leaves all PR changes as unstaged modifications.
+1. **Starting review**: Runs `jj git fetch` (only the base branch from `origin` and the head branch from `origin` or the fork remote), then creates a review change on the PR head - in a new jj workspace (workspace mode) or with `jj new` in the current one (inplace mode). A review change is identified by its description starting with `pr-review #<N>`.
 
-2. **Fork support**: Automatically detects fork PRs using GitHub's `isCrossRepository` field, adds the fork as a remote, and fetches from it.
+2. **Fork support**: Automatically detects fork PRs using GitHub's `isCrossRepository` field, adds a `fork-<owner>` remote with `jj git remote add`, and fetches only the PR head branch from it.
 
 3. **Comments**: Fetches PR comments via GitHub API and displays them as virtual text. Comments are cached per buffer for performance.
 
 4. **Pending comments**: Stored locally in session files (JSON format) and submitted to GitHub when you approve/request changes.
 
-5. **Change tracking**: Parses `git diff` output to identify changed lines and groups consecutive lines into "hunks" for the progress indicator.
+5. **Change tracking**: Diffs are computed against the merge-base of the PR head and the base branch (`heads(::head & ::base@origin)`) - the same base GitHub's "Files changed" tab uses, so changes that only landed on the base branch don't show up. The file list comes from `jj diff --from <merge-base> --to @` (renames are shown as a delete + an add). Base file content comes from `jj file show -r <merge-base>`, and hunks are computed with `vim.diff` between that content and the file on disk.
 
-6. **Cleanup**: Reverts only the files that were modified by the PR (safe for any other changes you made), deletes the review branch, and returns to your original branch.
+6. **Refresh**: `:PRRefresh` re-fetches, creates a new review change on the new PR head (in the same workspace in workspace mode) and abandons the old one. Local edits made in the review change are discarded.
+
+7. **Cleanup**: Abandons the review change and either removes the review workspace (workspace mode) or goes back to the change you were on (inplace mode).
 
 ## Troubleshooting
 
-### "Cannot start review: you have uncommitted changes"
+### "Not on a review change"
 
-Commit or stash your changes before starting a review:
-
-```bash
-git stash
-# or
-git commit -am "WIP"
-```
-
-### "Not on a review branch"
-
-You can only run `:PRReviewCleanup` when on a review branch (prefixed with `reviewing_` by default).
+You can only run `:PRReviewCleanup` while in a review, i.e. when the current change's description starts with `pr-review #<N>`.
 
 ### Comments not showing
 
@@ -668,15 +691,23 @@ gh auth status
 gh auth login  # if not authenticated
 ```
 
-### "git fetch failed"
+### Fetch failed
 
-If you see this error, you might have old fork remotes that are no longer accessible. Clean them up:
+If `jj git fetch` fails, you might have old fork remotes that are no longer accessible. Clean them up:
 
 ```bash
-git remote | grep "^fork-" | xargs -I {} git remote remove {}
+jj git remote list
+jj git remote remove fork-<owner>
 ```
 
-The plugin now has a fallback that tries `git fetch origin` if `git fetch --all` fails.
+### Leftover review workspaces
+
+If a review was never cleaned up (e.g. you chose "continue without cleanup"), its workspace stays on disk. List and remove it with:
+
+```bash
+jj workspace list
+jj workspace remove pr-<N>
+```
 
 ### Preview not working in fzf-lua
 
