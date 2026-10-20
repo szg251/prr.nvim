@@ -152,7 +152,6 @@ require("github-pr-reviewer").setup({
   commit_mode_toggle_key = "<C-t>",    -- toggle between the whole PR and single commits
   next_commit_key = "<C-n>",           -- next commit (enters commit mode)
   prev_commit_key = "<C-p>",           -- previous commit (enters commit mode)
-  commit_sidebar_toggle_key = "<C-b>", -- switch the sidebar between files and commits
 
   -- Key to go to next modified file (only works in review mode)
   next_file_key = "<C-l>",
@@ -362,9 +361,8 @@ All keybindings are configurable in setup and only activate during PR review mod
 
 Instead of the whole PR at once, you can review it one commit at a time:
 
-- `<C-t>` (default) - Toggle between reviewing the whole PR and single commits
+- `<C-t>` (default) - Toggle between reviewing the whole PR and single commits; the sidebar follows (file list for the whole PR, commit tree in commit mode)
 - `<C-n>` / `<C-p>` (default) - Next / previous commit (from PR mode they start at the first / last commit)
-- `<C-b>` (default) - Switch the sidebar between the file list and the commit tree
 
 In commit mode the review change is recreated on the commit's parents with the commit's files restored
 into it (`jj new <parents>` + `jj restore --from <commit>`), so the files on disk are exactly the commit's
@@ -373,7 +371,7 @@ merge-base and the PR head. Merge commits are listed against their auto-merged p
 only shows conflict resolutions, while git's `HEAD` is the first parent, so git tools show the merge
 against its first parent. The file list, file navigation and floats show the current commit.
 
-The commit sidebar shows the PR's commits (oldest first) with viewed progress; the current commit is
+In commit mode the sidebar shows the PR's commits (oldest first) with viewed progress; the current commit is
 expanded to its files. `<CR>` on a commit enters it (on the current one: fold/unfold), `<CR>` on a file
 enters its commit and opens it, `m` toggles viewed for a file or for a whole commit.
 

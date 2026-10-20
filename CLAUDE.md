@@ -193,7 +193,7 @@ Diffs are against the merge-base of the PR head and the base branch: `heads(::he
 - Merge commits: the file list shows only conflict resolutions (`jj diff -r` against the auto-merged parents), while git's `HEAD` is the first parent, so git tools show the merge against its first parent.
 - Use `current_commit()`, `diff_base_rev()` (merge-base or the commit's parent) and `diff_for_file()` (`jj.diff_file` vs `jj.diff_commit_file`) instead of reading `vim.g.pr_review_merge_base` directly.
 - Viewed state: `M._viewed_commit_files[commit_id][path]`, with `M._viewed_files[path]` derived (viewed in every commit touching it, see `sync_pr_viewed`). Always go through `is_file_viewed()` / `set_file_viewed()`.
-- The sidebar has two views (`M._sidebar_view` = "files" | "commits"); `render_commit_sidebar()` stores `{ is_commit }` / `{ is_commit_file }` items in `pr_file_map`.
+- The sidebar follows the review mode: `render_review_buffer()` shows the file list in PR mode and `render_commit_sidebar()` (storing `{ is_commit }` / `{ is_commit_file }` items in `pr_file_map`) in commit mode. There is no separate sidebar toggle.
 - Comments: in commit mode only comments with `original_commit_id == current commit` are shown at `original_line`; `github.comment_commit_id` makes new single comments target that commit; pending comments are blocked.
 
 ### Fetching Base Content
@@ -230,7 +230,7 @@ Status "A" (added): base content = empty, every line counts as changed.
   - `<C-l>` / `<C-h>` - Next/prev file
   - `<C-r>` - Toggle floats
   - `<CR>` - Mark as viewed and next
-  - `<C-t>` / `<C-n>` / `<C-p>` / `<C-b>` - Commit mode toggle / next / prev commit / commit sidebar
+  - `<C-t>` / `<C-n>` / `<C-p>` - Commit mode toggle (also switches the sidebar) / next / prev commit
 
 ## Configuration
 

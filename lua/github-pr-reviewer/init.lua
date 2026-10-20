@@ -19,10 +19,9 @@ M.config = {
   next_file_key = "<C-l>",        -- key to go to next modified file
   prev_file_key = "<C-h>",        -- key to go to previous modified file
   toggle_floats_key = "<C-r>",    -- toggle floating windows visibility
-  commit_mode_toggle_key = "<C-t>",    -- toggle between reviewing the whole PR and single commits
+  commit_mode_toggle_key = "<C-t>",    -- toggle between the whole PR (file sidebar) and single commits (commit sidebar)
   next_commit_key = "<C-n>",           -- go to next commit (enters commit mode)
   prev_commit_key = "<C-p>",           -- go to previous commit (enters commit mode)
-  commit_sidebar_toggle_key = "<C-b>", -- switch the sidebar between files and commits
 
   -- Review buffer settings
   review_buffer = {
@@ -57,7 +56,6 @@ M._viewed_commit_files = {}  -- commit id -> { path -> true }: viewed per commit
 M._commits = nil             -- PR commits, oldest first (see jj.pr_commits)
 M._commit_mode = false       -- reviewing a single commit instead of the whole PR
 M._current_commit = nil      -- commit id reviewed in commit mode
-M._sidebar_view = "files"    -- "files" | "commits"
 M._expanded_commits = {}     -- commit id -> bool, expansion state in the commit sidebar
 M._collapsed_dirs = {}         -- tracks which directories are collapsed in review buffer
 M._local_pending_comments = {} -- Local storage for pending comments (not synced to GitHub yet)
@@ -746,9 +744,9 @@ local function render_commit_sidebar()
   local cfg = M.config.review_buffer
   add("═══ PR Commits ═══")
   add("")
-  add(string.format("[%s] Files | [%s] Toggle | [q] Close", M.config.commit_sidebar_toggle_key, cfg.toggle_key))
+  add(string.format("[%s] Whole PR | [%s] Toggle | [q] Close", M.config.commit_mode_toggle_key, cfg.toggle_key))
   add("Open: [<CR>] Commit/File  [m] Mark viewed")
-  add(string.format("Mode: %s | %d/%d commits viewed", M._commit_mode and "commit" or "PR", viewed_commits, #commits))
+  add(string.format("%d/%d commits viewed", viewed_commits, #commits))
   add("")
   if not M._commits then
     add("Loading commits...", "Comment")
@@ -812,7 +810,8 @@ local function render_review_buffer()
     return
   end
 
-  if M._sidebar_view == "commits" then
+  -- The sidebar follows the review mode: commit tree in commit mode, file list for the whole PR
+  if M._commit_mode then
     render_commit_sidebar()
     return
   end
@@ -833,18 +832,14 @@ local function render_review_buffer()
   local cfg = M.config.review_buffer
   table.insert(lines, "═══ PR Review ═══")
   table.insert(lines, "")
-  table.insert(lines, string.format("[%s] Toggle | [q] Close", cfg.toggle_key))
+  table.insert(lines, string.format("[%s] Commits | [%s] Toggle | [q] Close", M.config.commit_mode_toggle_key,
+    cfg.toggle_key))
   table.insert(lines,
     string.format("Filters: [%s] All  [%s] Viewed  [%s] Not Viewed", cfg.filter_all_key, cfg.filter_viewed_key,
       cfg.filter_not_viewed_key))
   table.insert(lines,
     string.format("Open: [<CR>] Current  [%s] Split  [%s] VSplit", cfg.open_split_key, cfg.open_vsplit_key))
   table.insert(lines, string.format("Sort: %s | Filter: %s", M._review_sort or cfg.sort_by, M._review_filter))
-  local commit, commit_idx = current_commit()
-  if commit then
-    table.insert(lines, string.format("Commit %d/%d: %s %s", commit_idx, #M._commits, commit.short, commit.subject))
-    table.insert(highlights, { line = #lines - 1, hl_group = "Title" })
-  end
   table.insert(lines, "")
 
   -- Filter files based on current filter
@@ -1382,7 +1377,6 @@ local function setup_global_review_keymaps()
     { M.config.commit_mode_toggle_key, function() M.toggle_commit_mode() end, "Toggle PR / commit review mode" },
     { M.config.next_commit_key, function() M.next_commit() end, "Go to next commit (PR review mode)" },
     { M.config.prev_commit_key, function() M.prev_commit() end, "Go to previous commit (PR review mode)" },
-    { M.config.commit_sidebar_toggle_key, function() M.toggle_commit_sidebar() end, "Toggle files / commits sidebar" },
   }
   for _, k in ipairs(commit_keys) do
     local key, fn, desc = k[1], k[2], k[3]
@@ -1490,7 +1484,6 @@ update_changes_float = function()
     M._commit_mode and "Review whole PR" or "Review commits"))
   table.insert(keymap_lines, string.format(" %s: Next commit ", M.config.next_commit_key))
   table.insert(keymap_lines, string.format(" %s: Prev commit ", M.config.prev_commit_key))
-  table.insert(keymap_lines, string.format(" %s: Commits sidebar ", M.config.commit_sidebar_toggle_key))
 
   -- Helper to create/update float
   local function create_or_update_float(win_var, lines, row_offset, highlight)
@@ -5281,22 +5274,6 @@ function M.prev_commit()
   step_commit(-1)
 end
 
--- Switch the sidebar between the file list and the commit tree
-function M.toggle_commit_sidebar()
-  if not vim.g.pr_review_number then
-    return
-  end
-  M._sidebar_view = M._sidebar_view == "commits" and "files" or "commits"
-  if not M._commits then
-    load_commits(M.refresh_review_buffer)
-  end
-  if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
-    M.refresh_review_buffer()
-  else
-    M.open_review_buffer()
-  end
-end
-
 -- Refresh the PR branch with latest changes
 function M.refresh_pr_branch()
   local pr_number = vim.g.pr_review_number
@@ -5469,7 +5446,6 @@ function M.cleanup_review_branch()
       M._commits = nil
       M._commit_mode = false
       M._current_commit = nil
-      M._sidebar_view = "files"
       M._expanded_commits = {}
       github.comment_commit_id = nil
       M._buffer_jumped = {}

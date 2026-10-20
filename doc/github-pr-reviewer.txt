@@ -249,7 +249,6 @@ Configure the plugin by calling the setup function: >lua
       commit_mode_toggle_key = "<C-t>",
       next_commit_key = "<C-n>",
       prev_commit_key = "<C-p>",
-      commit_sidebar_toggle_key = "<C-b>",
 
       -- Key to go to next modified file
       next_file_key = "<C-l>",
@@ -321,11 +320,6 @@ next_commit_key         (string, default: "<C-n>")
 prev_commit_key         (string, default: "<C-p>")
                         Go to the next / previous commit. From PR mode they
                         enter commit mode at the first / last commit.
-
-                                                     *github-pr-reviewer.commit_sidebar_toggle_key*
-commit_sidebar_toggle_key (string, default: "<C-b>")
-                        Switch the sidebar between the file list and the
-                        commit tree.
 
                                                      *github-pr-reviewer.next_file_key*
 next_file_key           (string, default: "<C-l>")
@@ -446,9 +440,9 @@ COMMIT-BASED REVIEWING~
                                                      *github-pr-reviewer-commit-mode*
 Review the PR one commit at a time instead of all at once:
 
-• <C-t> (default) - Toggle between the whole PR and single commits
+• <C-t> (default) - Toggle between the whole PR and single commits (the
+  sidebar follows: file list for the whole PR, commit tree in commit mode)
 • <C-n> / <C-p> (default) - Next / previous commit
-• <C-b> (default) - Switch the sidebar between files and commits
 
 In commit mode the review change is recreated on the commit's parents with
 the commit's files restored into it (`jj new <parents>` + `jj restore --from
@@ -459,8 +453,8 @@ auto-merged parents, so the file list only shows conflict resolutions, while
 git's HEAD is the first parent, so git tools show the merge against its first
 parent. File list, file navigation and floats show the current commit.
 
-The commit sidebar lists the PR's commits (oldest first) with viewed progress;
-the current commit is expanded to its files. <CR> on a commit enters it (on
+In commit mode the sidebar lists the PR's commits (oldest first) with viewed
+progress; the current commit is expanded to its files. <CR> on a commit enters it (on
 the current one: fold/unfold), <CR> on a file enters its commit and opens it,
 `m` toggles viewed for a file or a whole commit.
 
