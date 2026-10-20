@@ -1172,6 +1172,40 @@ local function setup_review_buffer_keymaps(bufnr)
   vim.api.nvim_buf_set_keymap(bufnr, "n", "<CR>", [[<Cmd>lua _G._pr_reviewer_open_file()<CR>]],
     { noremap = true, silent = true, nowait = true })
 
+  -- Mouse: single click folds (directory, current commit), double click opens a file or enters a
+  -- commit. A double click also delivers the first click, so each handler only acts on its own rows.
+  local function mouse_item()
+    local pos = vim.fn.getmousepos()
+    if pos.winid ~= vim.api.nvim_get_current_win() or pos.line < 1
+        or pos.line > vim.api.nvim_buf_line_count(bufnr) then
+      return nil
+    end
+    vim.api.nvim_win_set_cursor(pos.winid, { pos.line, 0 })
+    local item = (vim.b[bufnr].pr_file_map or {})[pos.line]
+    return type(item) == "table" and item or nil
+  end
+  local function is_fold_row(item)
+    if item.is_directory then
+      return true
+    end
+    local current = current_commit()
+    return item.is_commit and current ~= nil and current.id == item.commit.id
+  end
+
+  vim.keymap.set("n", "<LeftRelease>", function()
+    local item = mouse_item()
+    if item and is_fold_row(item) then
+      open_file_from_review(nil)
+    end
+  end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Fold item under the mouse" })
+
+  vim.keymap.set("n", "<2-LeftMouse>", function()
+    local item = mouse_item()
+    if item and not is_fold_row(item) then
+      open_file_from_review(nil)
+    end
+  end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Open item under the mouse" })
+
   vim.keymap.set("n", cfg.open_split_key, function()
     open_file_from_review("split")
   end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Open file in split" })
