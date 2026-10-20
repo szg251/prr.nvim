@@ -177,7 +177,7 @@ Fetching: `jj git fetch` only the base branch from `origin` and the head branch 
 
 - `set_review_location(state)` stores `vim.g.pr_review_mode/root/main_root/workspace/merge_base/change` and sets **`jj.cwd = state.root`**, so every jj command runs in the review root.
 - **`review_root()` / `review_path(path)`** (init.lua) build PR file paths from `vim.g.pr_review_root`, NOT `vim.fn.getcwd()`. Always use them for PR file paths - the cwd is not the review root outside the review tab.
-- Sessions are keyed by the shared repo store (`<root>/.jj/repo`, resolved), so a session is found from any workspace.
+- Sessions are stored per PR (`session_prefix()` = shared repo store `<root>/.jj/repo`, plus `_pr<N>`). `find_session()` prefers the PR whose review change is checked out in the current directory (`jj.current_review_pr(cwd)`), else the most recently saved session; `load_last_session` starts a fresh review of that PR when it has no session file.
 
 ### Diff Base (merge-base)
 

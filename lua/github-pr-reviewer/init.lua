@@ -109,6 +109,9 @@ end
 local function open_review_tab(root)
   if M._review_tab and vim.api.nvim_tabpage_is_valid(M._review_tab) then
     vim.api.nvim_set_current_tabpage(M._review_tab)
+  elseif vim.fn.getcwd() == root then
+    -- Already in the review workspace (e.g. Neovim was started there)
+    M._review_tab = vim.api.nvim_get_current_tabpage()
   else
     vim.cmd("tabnew")
     M._review_tab = vim.api.nvim_get_current_tabpage()
@@ -221,12 +224,71 @@ local function commit_progress(commit)
   return viewed, #commit.files
 end
 
-local function get_session_file()
-  -- Keyed by the shared jj repo, so the session is found from any workspace of the repo
+-- Common path prefix of this repo's session files. Keyed by the shared jj repo, so sessions are
+-- found from any workspace of the repo
+local function session_prefix()
   local key = jj.repo_id() or vim.fn.getcwd()
   -- Convert path to safe filename: /home/otavio/Projetos/api/.jj/repo -> review_home_otavio_Projetos_api_.jj_repo
   local safe_name = key:gsub("^/", ""):gsub("/", "_")
-  return get_session_dir() .. "/review_" .. safe_name .. ".json"
+  return get_session_dir() .. "/review_" .. safe_name
+end
+
+-- Session file of a PR (default: the PR under review); one file per PR
+local function get_session_file(pr_number)
+  return string.format("%s_pr%s.json", session_prefix(), tostring(pr_number or vim.g.pr_review_number))
+end
+
+local function read_session(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+  local content = file:read("*all")
+  file:close()
+  local ok, session_data = pcall(vim.fn.json_decode, content)
+  if not ok or type(session_data) ~= "table" then
+    return nil
+  end
+  return session_data
+end
+
+-- Session to restore: the one of the PR checked out in the current directory's workspace (its
+-- working copy is a review change), else the most recently saved session of this repo.
+-- Returns session_data (or nil), the PR checked out here (or nil) and the session file path.
+local function find_session()
+  local prefix = session_prefix()
+  -- Single session file used before sessions were stored per PR
+  local legacy_path = prefix .. ".json"
+  local legacy = read_session(legacy_path)
+
+  local workspace_pr = jj.current_review_pr(vim.fn.getcwd())
+  if workspace_pr then
+    local path = get_session_file(workspace_pr)
+    local data = read_session(path)
+    if not data and legacy and legacy.pr_number == workspace_pr then
+      return legacy, workspace_pr, legacy_path
+    end
+    return data, workspace_pr, path
+  end
+
+  local dir = get_session_dir()
+  local base = vim.fn.fnamemodify(prefix, ":t") .. "_pr"
+  local best, best_time = legacy and legacy_path or nil, legacy and vim.fn.getftime(legacy_path) or -1
+  if vim.fn.isdirectory(dir) == 1 then
+    for _, name in ipairs(vim.fn.readdir(dir)) do
+      if name:sub(1, #base) == base and name:match("%.json$") then
+        local path = dir .. "/" .. name
+        local time = vim.fn.getftime(path)
+        if time > best_time then
+          best, best_time = path, time
+        end
+      end
+    end
+  end
+  if not best then
+    return nil, nil, nil
+  end
+  return read_session(best), nil, best
 end
 
 local function save_session()
@@ -268,27 +330,14 @@ local function save_session()
   end
 end
 
-local function load_session()
-  local session_file = get_session_file()
-  local file = io.open(session_file, "r")
-  if not file then
-    return nil
-  end
-
-  local content = file:read("*all")
-  file:close()
-
-  local ok, session_data = pcall(vim.fn.json_decode, content)
-  if not ok or not session_data then
-    return nil
-  end
-
-  return session_data
-end
-
 local function delete_session()
-  local session_file = get_session_file()
-  vim.fn.delete(session_file)
+  vim.fn.delete(get_session_file())
+  -- Also drop the pre-per-PR session file if it belongs to this PR
+  local legacy_path = session_prefix() .. ".json"
+  local legacy = read_session(legacy_path)
+  if legacy and legacy.pr_number == vim.g.pr_review_number then
+    vim.fn.delete(legacy_path)
+  end
 end
 
 -- Forward declarations
@@ -4199,11 +4248,11 @@ function M.delete_my_comment()
 end
 
 function M.show_session_info()
-  local session_file = get_session_file()
-  local session_data = load_session()
+  local session_data, workspace_pr, session_file = find_session()
 
   local lines = {
-    "Session file: " .. session_file,
+    "Session file: " .. (session_file or "none"),
+    "PR checked out in this workspace: " .. (workspace_pr and ("#" .. workspace_pr) or "none"),
     "",
   }
 
@@ -4241,9 +4290,22 @@ function M.load_last_session()
     return
   end
 
-  local session_data = load_session()
+  local session_data, workspace_pr = find_session()
 
   if not session_data then
+    if workspace_pr then
+      -- This workspace has a review change but no saved session: start the review from here
+      vim.notify("No saved session for PR #" .. workspace_pr .. ", starting its review...", vim.log.levels.INFO)
+      local in_secondary_workspace = jj.root(vim.fn.getcwd()) ~= jj.workspaces().default
+      github.get_pr_for_review(workspace_pr, function(pr, err)
+        if not pr then
+          vim.notify("Error getting PR #" .. workspace_pr .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
+          return
+        end
+        M._do_start_review(pr, in_secondary_workspace and "workspace" or nil)
+      end)
+      return
+    end
     vim.notify("No saved session found for this project", vim.log.levels.INFO)
     return
   end
@@ -4276,7 +4338,7 @@ function M.load_last_session()
     head = session_data.head,
     review_change = session_data.review_change,
   })
-  if session_data.mode == "workspace" and vim.fn.getcwd() ~= root then
+  if session_data.mode == "workspace" then
     open_review_tab(root)
   end
   vim.g.pr_review_modified_files = session_data.modified_files
@@ -4685,8 +4747,9 @@ function M._start_review_for_pr(pr)
   end
 end
 
-function M._do_start_review(pr)
-  local mode = M.config.review_mode == "inplace" and "inplace" or "workspace"
+-- mode_override: "workspace" | "inplace" (default: M.config.review_mode)
+function M._do_start_review(pr, mode_override)
+  local mode = (mode_override or M.config.review_mode) == "inplace" and "inplace" or "workspace"
 
   -- Inplace: if we are already on a review change (e.g. continuing without cleanup), replace it
   -- Otherwise remember where we were, to go back there on cleanup
@@ -5414,10 +5477,46 @@ function M.refresh_pr_branch()
   })
 end
 
+-- Where the review to clean up lives when no review is loaded in this Neovim (e.g. :PRReviewCleanup
+-- right after starting Neovim in a review workspace): from the PR's saved session, else from jj
+local function detect_review_location(pr_number)
+  local session = read_session(get_session_file(pr_number))
+  if session and session.mode then
+    return {
+      mode = session.mode,
+      root = session.root,
+      main_root = session.main_root,
+      workspace = session.workspace,
+      previous = session.previous_change,
+    }
+  end
+
+  local root = jj.root()
+  local workspaces = jj.workspaces()
+  for name, ws_root in pairs(workspaces) do
+    if name ~= "default" and ws_root == root then
+      return { mode = "workspace", root = root, main_root = workspaces.default, workspace = name }
+    end
+  end
+  return { mode = "inplace", root = root, main_root = workspaces.default or root }
+end
+
 function M.cleanup_review_branch()
-  if not jj.current_review_pr() then
+  local pr_number = jj.current_review_pr()
+  if not pr_number then
     vim.notify("Not on a review change", vim.log.levels.WARN)
     return
+  end
+
+  -- No review loaded: find out where it lives so the workspace (if any) is removed too
+  if not vim.g.pr_review_mode then
+    local location = detect_review_location(pr_number)
+    vim.g.pr_review_number = vim.g.pr_review_number or pr_number
+    vim.g.pr_review_mode = location.mode
+    vim.g.pr_review_root = location.root
+    vim.g.pr_review_main_root = location.main_root
+    vim.g.pr_review_workspace = location.workspace
+    vim.g.pr_review_previous_change = vim.g.pr_review_previous_change or location.previous
   end
 
   -- Confirm before exiting review
@@ -5452,6 +5551,11 @@ function M.cleanup_review_branch()
       vim.cmd("tcd " .. vim.fn.fnameescape(cleanup_state.main_root))
     end
     M._review_tab = nil
+    -- Don't leave Neovim's global working directory inside the directory that is about to go
+    local global_cwd = vim.fn.getcwd(-1, -1)
+    if root and cleanup_state.main_root and (global_cwd == root or global_cwd:sub(1, #root + 1) == root .. "/") then
+      vim.cmd("cd " .. vim.fn.fnameescape(cleanup_state.main_root))
+    end
     -- The review workspace is about to be deleted, run jj from the main workspace from now on
     jj.cwd = cleanup_state.main_root
   end
@@ -5672,13 +5776,11 @@ function M.show_review_menu()
   local in_review_mode = vim.g.pr_review_number ~= nil
 
   -- Check if there's a saved session
-  local has_session = false
-  local session_file = get_session_file()
-  local file = io.open(session_file, "r")
-  if file then
-    file:close()
-    has_session = true
+  local session_data, workspace_pr = nil, nil
+  if not in_review_mode then
+    session_data, workspace_pr = find_session()
   end
+  local has_session = session_data ~= nil or workspace_pr ~= nil
 
   -- Define menu sections based on mode
   local sections = {}
@@ -5691,7 +5793,8 @@ function M.show_review_menu()
 
     -- If has session, make Load the primary option (l key); review requests always come second
     if has_session then
-      table.insert(items, { key = "l", desc = "Load Last Session",              cmd = function() M.load_last_session() end })
+      local load_desc = workspace_pr and ("Resume PR #" .. workspace_pr .. " (this workspace)") or "Load Last Session"
+      table.insert(items, { key = "l", desc = load_desc, cmd = function() M.load_last_session() end })
       table.insert(items, review_requests)
       table.insert(items, { key = "p", desc = "List Pull Requests",             cmd = function() M.review_pr() end })
     else

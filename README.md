@@ -489,7 +489,7 @@ Benefits:
 The plugin automatically saves your review session state:
 
 - **Auto-save**: Session is saved when you start a review
-- **Per-repository**: Sessions are keyed by the shared jj repo store (`<root>/.jj/repo`), so a session is found from any workspace of the repo
+- **Per PR**: Each PR has its own session, keyed by the shared jj repo store (`<root>/.jj/repo`) and the PR number, so sessions are found from any workspace of the repo
 - **What's saved**: PR number, review mode, review root, main root, workspace name, merge base, review change, previous change, modified files, viewed status, pending comments
 - **Auto-cleanup**: Session file is deleted when you run `:PRReviewCleanup`
 
@@ -499,7 +499,9 @@ To restore a session after restarting Neovim:
 :PRLoadLastSession
 ```
 
-In workspace mode, restoring a session reopens the review tab (`:tcd` into the workspace).
+`:PRLoadLastSession` (`l` in the `:PR` menu) first looks at the current directory: if it is a review workspace (its working copy is a `pr-review #<N>` change), it resumes PR N, even if another PR's session is newer. The menu then shows `Resume PR #<N> (this workspace)`. If PR N has no saved session, its review is started again in that workspace. Anywhere else, the most recently saved session of the repo is restored.
+
+In workspace mode, restoring a session reopens the review tab (`:tcd` into the workspace), or uses the current tab when Neovim is already in the workspace.
 
 Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
 

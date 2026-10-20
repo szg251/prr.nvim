@@ -69,6 +69,37 @@ function M.list_open_prs()
   return formatted, nil
 end
 
+-- The PR fields needed to start a review of PR pr_number. callback(pr, err)
+function M.get_pr_for_review(pr_number, callback)
+  local cmd = { "gh", "pr", "view", tostring(pr_number), "--json",
+    "number,title,headRefName,baseRefName,headRepositoryOwner,headRepository,isCrossRepository" }
+  vim.system(cmd, { text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 then
+        callback(nil, vim.trim(result.stderr or "gh pr view failed"))
+        return
+      end
+      local ok, info = pcall(vim.json.decode, result.stdout or "")
+      if not ok or type(info) ~= "table" then
+        callback(nil, "Failed to parse PR details")
+        return
+      end
+      local pr = {
+        number = info.number,
+        title = info.title,
+        head_branch = info.headRefName,
+        base_branch = info.baseRefName,
+      }
+      if info.isCrossRepository and type(info.headRepositoryOwner) == "table" and type(info.headRepository) == "table" then
+        pr.head_repo_owner = info.headRepositoryOwner.login
+        pr.head_repo_url = string.format("https://github.com/%s/%s.git", pr.head_repo_owner, info.headRepository.name)
+        pr.head_label = pr.head_repo_owner .. ":" .. info.headRefName
+      end
+      callback(pr, nil)
+    end)
+  end)
+end
+
 -- Get detailed PR info including correct branch for forks
 function M.get_pr_details(pr_number, callback)
   local cmd = string.format("gh pr view %d --json headRefName,headRepositoryOwner", pr_number)
