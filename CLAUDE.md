@@ -108,7 +108,7 @@ M._start_review_for_pr(pr) → M._do_start_review(pr)
 jj.checkout_pr()   # jj git fetch + (workspace add | jj new) on merge-base + jj restore --from <pr head>
   ↓
 set_review_location(state)  # vim.g.pr_review_root, jj.cwd, ...
-open_review_tab(root)       # workspace mode only (tabnew + tcd)
+enter_review_workspace(root) # workspace mode only (:cd, remembers vim.g.pr_review_previous_cwd)
   ↓
 collect_pr_files()  # jj.changed_files(merge_base) + stats
   ↓
@@ -164,7 +164,7 @@ All VCS work goes through `jj.lua`; there are no git commands, branches, stashes
 
 A **review change** is a change whose description starts with `pr-review #<N>` (`jj.current_review_pr()` detects it). `M.config.review_mode` picks where it lives:
 
-- **`"workspace"` (default)**: `jj workspace add --name pr-<N> -r <merge-base> -m "pr-review #<N>: <head> -> <base>" <path>` then `jj restore --from <pr head>` in it (path from `M.config.workspace_path` or `<repo_root>/../<repo>-pr-<N>`). The review opens in its own tab (`open_review_tab()`: `tabnew` + `tcd`). An existing `pr-<N>` workspace is reused. Cleanup wipes the workspace's buffers, closes the tab, runs `jj workspace remove pr-<N>` and abandons the review change.
+- **`"workspace"` (default)**: `jj workspace add --name pr-<N> -r <merge-base> -m "pr-review #<N>: <head> -> <base>" <path>` then `jj restore --from <pr head>` in it (path from `M.config.workspace_path` or `<repo_root>/../<repo>-pr-<N>`). Neovim `:cd`s into it (`enter_review_workspace()`; `leave_review_workspace()` cds back on cleanup / when the review is put aside). An existing `pr-<N>` workspace is reused. Cleanup wipes the workspace's buffers (`wipe_buffers_under()`, windows keep an empty buffer), cds out, runs `jj workspace remove pr-<N>` and abandons the review change.
 - **`"inplace"`**: `jj new <merge-base> -m "pr-review #<N>: ..."` + `jj restore --from <pr head>` in the current workspace; the previous change is kept in `vim.g.pr_review_previous_change`. Cleanup does `jj edit` back to it (or `jj new` on its parents if it was auto-abandoned) and abandons the review change.
 
 The review change is on the diff base with the reviewed tree restored into it: files on disk are exactly the PR head, but git's `HEAD` (and index) in a colocated repo is the diff base, so git tools show the PR's changes. The PR's commits are never the working copy, so edits can't rewrite them. The review change is non-empty while reviewing (it holds a copy of the diff) and is abandoned on cleanup / when switching commits. Workspace mode gets a git worktree when the repo is colocated.
@@ -176,7 +176,7 @@ Fetching: `jj git fetch` only the base branch from `origin` and the head branch 
 ### Review Location (paths and cwd)
 
 - `set_review_location(state)` stores `vim.g.pr_review_mode/root/main_root/workspace/merge_base/change` and sets **`jj.cwd = state.root`**, so every jj command runs in the review root.
-- **`review_root()` / `review_path(path)`** (init.lua) build PR file paths from `vim.g.pr_review_root`, NOT `vim.fn.getcwd()`. Always use them for PR file paths - the cwd is not the review root outside the review tab.
+- **`review_root()` / `review_path(path)`** (init.lua) build PR file paths from `vim.g.pr_review_root`, NOT `vim.fn.getcwd()`. Always use them for PR file paths - the cwd is not necessarily the review root (e.g. a tab with its own `:tcd`).
 - Sessions are stored per PR (`session_prefix()` = shared repo store `<root>/.jj/repo`, plus `_pr<N>`). `find_session()` prefers the PR whose review change is checked out in the current directory (`jj.current_review_pr(cwd)`), else the most recently saved session; `load_last_session` starts a fresh review of that PR when it has no session file. Open reviews are listed by `M.review_sessions()` from `jj.review_workspaces()` (workspaces whose `@` description starts with `pr-review #`); switching uses `M._unload_review()` (save session, close tab, `reset_review_state()`, workspace kept), removal `M._remove_review_session()` (`jj.cleanup_review` + session delete). `restore_session()` / `resume_without_session()` are shared with `load_last_session`.
 
 ### Diff Base (merge-base)
@@ -333,7 +333,7 @@ git diff HEAD       # should be exactly the reviewed changes
    -- WRONG:
    for _, win in ipairs(vim.api.nvim_list_wins()) do ...
 
-   -- RIGHT (the review lives in its own tab in workspace mode):
+   -- RIGHT (the sidebar and review windows belong to the current tab):
    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do ...
    ```
 

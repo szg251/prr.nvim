@@ -5,7 +5,7 @@ local jj = require("github-pr-reviewer.jj")
 local ui = require("github-pr-reviewer.ui")
 
 M.config = {
-  review_mode = "workspace",      -- "workspace": review in a separate jj workspace opened in a new tab
+  review_mode = "workspace",      -- "workspace": review in a separate jj workspace (Neovim :cd's into it)
                                   -- "inplace": review change in the current workspace
   workspace_path = nil,           -- fun(repo_root, pr_number) -> path; default: <repo_root>/../<repo>-pr-<n>
   picker = "native",              -- "native", "fzf-lua", "telescope"
@@ -106,18 +106,55 @@ local function set_review_location(state)
   jj.cwd = state.root
 end
 
--- Open a new tab whose working directory is the review workspace
-local function open_review_tab(root)
-  if M._review_tab and vim.api.nvim_tabpage_is_valid(M._review_tab) then
-    vim.api.nvim_set_current_tabpage(M._review_tab)
-  elseif vim.fn.getcwd() == root then
-    -- Already in the review workspace (e.g. Neovim was started there)
-    M._review_tab = vim.api.nvim_get_current_tabpage()
-  else
-    vim.cmd("tabnew")
-    M._review_tab = vim.api.nvim_get_current_tabpage()
+local function change_dir(dir)
+  vim.cmd("cd " .. vim.fn.fnameescape(dir))
+  -- :cd keeps a tab-local directory, which would otherwise still apply in this tab
+  if vim.fn.haslocaldir(-1) == 1 then
+    vim.cmd("tcd " .. vim.fn.fnameescape(dir))
   end
-  vim.cmd("tcd " .. vim.fn.fnameescape(root))
+end
+
+local function is_under(path, root)
+  return root ~= nil and (path == root or path:sub(1, #root + 1) == root .. "/")
+end
+
+-- :cd into the review workspace; the directory Neovim came from is restored when leaving it
+local function enter_review_workspace(root)
+  if vim.fn.getcwd() == root then
+    return
+  end
+  if not vim.g.pr_review_previous_cwd then
+    vim.g.pr_review_previous_cwd = vim.fn.getcwd()
+  end
+  change_dir(root)
+end
+
+-- :cd back out of the review workspace (to where Neovim came from, else to fallback)
+local function leave_review_workspace(root, fallback)
+  local target = vim.g.pr_review_previous_cwd
+  vim.g.pr_review_previous_cwd = nil
+  if not target or is_under(target, root) or vim.fn.isdirectory(target) == 0 then
+    target = fallback
+  end
+  if target and (is_under(vim.fn.getcwd(), root) or is_under(vim.fn.getcwd(-1, -1), root)) then
+    change_dir(target)
+  end
+end
+
+-- Delete the buffers of files in root (unmodified ones only unless force). Windows showing them
+-- get an empty buffer first, so the window layout survives.
+local function wipe_buffers_under(root, force)
+  local empty = nil
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
+    if root and name:sub(1, #root + 1) == root .. "/" and (force or not vim.bo[buf].modified) then
+      for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+        empty = empty and vim.api.nvim_buf_is_valid(empty) and empty or vim.api.nvim_create_buf(true, false)
+        pcall(vim.api.nvim_win_set_buf, win, empty)
+      end
+      pcall(vim.api.nvim_buf_delete, buf, { force = force })
+    end
+  end
 end
 
 -- The commit reviewed in commit mode (nil in PR mode) and its index in M._commits
@@ -4380,7 +4417,7 @@ local function restore_session(session_data)
     review_change = session_data.review_change,
   })
   if session_data.mode == "workspace" then
-    open_review_tab(root)
+    enter_review_workspace(root)
   end
   vim.g.pr_review_modified_files = session_data.modified_files
   M._viewed_files = session_data.viewed_files or {}
@@ -4857,7 +4894,7 @@ function M._do_start_review(pr, mode_override)
     state.mode = mode
     set_review_location(state)
     if mode == "workspace" then
-      open_review_tab(state.root)
+      enter_review_workspace(state.root)
     end
     M._commits = nil
     M._commit_mode = false
@@ -5677,27 +5714,10 @@ function M.cleanup_review_branch()
   }
 
   if cleanup_state.mode == "workspace" then
-    -- Leave the workspace before it is deleted: wipe its buffers and close the review tab
+    -- Leave the workspace before it is deleted: wipe its buffers and :cd back out of it
     local root = vim.g.pr_review_root
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      -- Deleting one buffer can wipe others (e.g. the review buffer), so re-check validity
-      local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
-      if root and name:sub(1, #root + 1) == root .. "/" then
-        pcall(vim.api.nvim_buf_delete, buf, { force = true })
-      end
-    end
-    if M._review_tab and vim.api.nvim_tabpage_is_valid(M._review_tab) and #vim.api.nvim_list_tabpages() > 1 then
-      vim.api.nvim_set_current_tabpage(M._review_tab)
-      vim.cmd("tabclose")
-    elseif cleanup_state.main_root then
-      vim.cmd("tcd " .. vim.fn.fnameescape(cleanup_state.main_root))
-    end
-    M._review_tab = nil
-    -- Don't leave Neovim's global working directory inside the directory that is about to go
-    local global_cwd = vim.fn.getcwd(-1, -1)
-    if root and cleanup_state.main_root and (global_cwd == root or global_cwd:sub(1, #root + 1) == root .. "/") then
-      vim.cmd("cd " .. vim.fn.fnameescape(cleanup_state.main_root))
-    end
+    wipe_buffers_under(root, true)
+    leave_review_workspace(root, cleanup_state.main_root)
     -- The review workspace is about to be deleted, run jj from the main workspace from now on
     jj.cwd = cleanup_state.main_root
   end
@@ -5716,17 +5736,7 @@ end
 
 -- ===== Open review sessions: every workspace whose working copy is a review change =====
 
--- Delete a review's buffers that live in root (unmodified ones only unless force)
-local function wipe_buffers_under(root, force)
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
-    if root and name:sub(1, #root + 1) == root .. "/" and (force or not vim.bo[buf].modified) then
-      pcall(vim.api.nvim_buf_delete, buf, { force = force })
-    end
-  end
-end
-
--- Put the loaded review aside without cleaning it up: save its session, close its tab and state.
+-- Put the loaded review aside without cleaning it up: save its session, :cd out, reset state.
 -- Its workspace and review change stay, so it can be opened again later.
 function M._unload_review()
   if not vim.g.pr_review_number then
@@ -5735,12 +5745,8 @@ function M._unload_review()
   save_session()
   if vim.g.pr_review_mode == "workspace" then
     wipe_buffers_under(vim.g.pr_review_root, false)
-    if M._review_tab and vim.api.nvim_tabpage_is_valid(M._review_tab) and #vim.api.nvim_list_tabpages() > 1 then
-      vim.api.nvim_set_current_tabpage(M._review_tab)
-      pcall(vim.cmd, "tabclose")
-    end
+    leave_review_workspace(vim.g.pr_review_root, vim.g.pr_review_main_root)
   end
-  M._review_tab = nil
   reset_review_state()
 end
 
@@ -5748,7 +5754,7 @@ end
 function M._open_review_session(entry)
   if vim.g.pr_review_number == entry.pr then
     if vim.g.pr_review_mode == "workspace" and vim.g.pr_review_root then
-      open_review_tab(vim.g.pr_review_root)
+      enter_review_workspace(vim.g.pr_review_root)
     end
     M.open_review_buffer()
     return

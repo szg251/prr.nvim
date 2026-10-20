@@ -116,7 +116,7 @@ EOF
 ```lua
 require("github-pr-reviewer").setup({
   -- Where to review: "workspace" (default) checks the PR out in a separate jj
-  -- workspace opened in a new tab; "inplace" creates the review change in the
+  -- workspace and :cd's into it; "inplace" creates the review change in the
   -- current workspace
   review_mode = "workspace",
 
@@ -306,7 +306,7 @@ jj workspace add --name pr-<N> -r <merge-base> -m "pr-review #<N>: <head> -> <ba
 jj restore --from <pr head>   # in the new workspace
 ```
 
-Neovim opens a **new tab** and `:tcd`s into the workspace. Your original checkout and your other tabs are left untouched (no LSP or file-watcher churn). The workspace path defaults to a sibling directory, `<repo_root>/../<repo-name>-pr-<number>`; override it with `workspace_path`. If a `pr-<N>` workspace already exists (e.g. a review that was never cleaned up) it is reused.
+Neovim `:cd`s into the workspace, and back to where it came from when the review is cleaned up or put aside. Your original checkout is left untouched (no LSP or file-watcher churn). The workspace path defaults to a sibling directory, `<repo_root>/../<repo-name>-pr-<number>`; override it with `workspace_path`. If a `pr-<N>` workspace already exists (e.g. a review that was never cleaned up) it is reused.
 
 Tradeoff: files jj doesn't track (`node_modules`, `.env`, virtualenvs, ...) are not present in the new workspace, so LSP or builds may not work there. Use inplace mode if you need them.
 
@@ -505,11 +505,11 @@ To restore a session after restarting Neovim:
 :PRLoadLastSession
 ```
 
-**Review sessions:** `:PRReviewSessions` (`l` in the `:PR` menu, `w` during a review) lists every open review of the repository: each workspace whose working copy is a `pr-review #<N>` change (found with `jj workspace list`), including an inplace review in the default workspace. The review of the current workspace comes first; each entry shows whether a saved session exists. Picking one restores its session (or starts its review again in that workspace if it has none). If you are reviewing another PR, that review is put aside first: its session is saved and its tab closed, but its workspace stays, so you can switch back later. `<C-d>` (`review_sessions_delete_key`) in the picker removes the selected review: its workspace (or inplace review change) and session. With a single open review and nothing loaded, it is resumed directly.
+**Review sessions:** `:PRReviewSessions` (`l` in the `:PR` menu, `w` during a review) lists every open review of the repository: each workspace whose working copy is a `pr-review #<N>` change (found with `jj workspace list`), including an inplace review in the default workspace. The review of the current workspace comes first; each entry shows whether a saved session exists. Picking one restores its session (or starts its review again in that workspace if it has none). If you are reviewing another PR, that review is put aside first: its session is saved and Neovim `:cd`s out, but its workspace stays, so you can switch back later. `<C-d>` (`review_sessions_delete_key`) in the picker removes the selected review: its workspace (or inplace review change) and session. With a single open review and nothing loaded, it is resumed directly.
 
 `:PRLoadLastSession` first looks at the current directory: if it is a review workspace, it resumes that PR, even if another PR's session is newer. If the PR has no saved session, its review is started again in that workspace. Anywhere else, the most recently saved session of the repo is restored.
 
-In workspace mode, restoring a session reopens the review tab (`:tcd` into the workspace), or uses the current tab when Neovim is already in the workspace.
+In workspace mode, restoring a session `:cd`s into the review workspace.
 
 Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
 
@@ -519,7 +519,7 @@ Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
    - If you have pending comments, they'll be shown for confirmation
    - All pending comments are submitted with your review
 2. Run `:PRReviewCleanup` to:
-   - **Workspace mode**: wipe the workspace's buffers, close the review tab and run `jj workspace remove pr-<N>` (deletes the directory and its git worktree)
+   - **Workspace mode**: wipe the workspace's buffers, `:cd` back to where you came from and run `jj workspace remove pr-<N>` (deletes the directory and its git worktree)
    - **Inplace mode**: return to the change you were on before the review
    - Abandon the review change
    - Clear the session

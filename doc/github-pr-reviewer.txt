@@ -82,7 +82,7 @@ After installation, run `:helptags ALL` to generate help tags.
 4. QUICK START                                      *github-pr-reviewer-quickstart*
 
 1. Run |:PRListReviewRequests| to see PRs requesting your review
-2. Select a PR to review (it opens in a new tab, see
+2. Select a PR to review (Neovim |:cd|s into its review workspace, see
    |github-pr-reviewer-review-modes|)
 3. Use |:PRReviewBuffer| to see all changed files
 4. Navigate with LSP (gd, gr, K) and your favorite tools
@@ -127,8 +127,8 @@ REVIEW WORKFLOW~
 
                                                      *:PRReviewCleanup*
 :PRReviewCleanup        End the current review. In workspace mode, wipes
-                        the workspace's buffers, closes the review tab
-                        and runs `jj workspace remove pr-<N>`. In inplace
+                        the workspace's buffers, |:cd|s back to where you
+                        came from and runs `jj workspace remove pr-<N>`. In inplace
                         mode, returns to the change you were on. In both
                         modes, abandons the review change and clears the
                         session.
@@ -151,8 +151,8 @@ REVIEW WORKFLOW~
 :PRLoadLastSession      Restore the last PR review session after
                         restarting Neovim. Restores PR number, review
                         location, modified files, viewed status, and
-                        pending comments. In workspace mode, reopens the
-                        review tab.
+                        pending comments. In workspace mode, |:cd|s into
+                        the review workspace.
 
                                                      *:PRReviewBuffer*
 :PRReviewBuffer         Toggle the review buffer (interactive file
@@ -223,7 +223,7 @@ REVIEW ACTIONS~
 Configure the plugin by calling the setup function: >lua
 
     require("github-pr-reviewer").setup({
-      -- "workspace": review in a separate jj workspace in a new tab
+      -- "workspace": review in a separate jj workspace (:cd into it)
       -- "inplace": review change in the current workspace
       review_mode = "workspace",
 
@@ -271,8 +271,8 @@ OPTIONS~
                                                      *github-pr-reviewer.review_mode*
 review_mode             (string, default: "workspace")
                         Where the review happens. Options:
-                        "workspace" - separate jj workspace opened in a
-                                      new tab
+                        "workspace" - separate jj workspace; Neovim
+                                      |:cd|s into it
                         "inplace"   - review change in the current
                                       workspace
                         See |github-pr-reviewer-review-modes|.
@@ -396,8 +396,9 @@ Workspace mode (default, `review_mode = "workspace"`): >bash
       -m "pr-review #<N>: <head> -> <base>" <path>
     jj restore --from <pr head>   # in the new workspace
 <
-Neovim opens a new tab and |:tcd|s into the workspace. Your original
-checkout and other tabs are untouched (no LSP/watcher churn). An existing
+Neovim |:cd|s into the workspace (and back to where it came from when the
+review is cleaned up or put aside). Your original checkout is untouched (no
+LSP/watcher churn). An existing
 `pr-<N>` workspace is reused (refresh, or a review never cleaned up).
 Files jj doesn't track (node_modules, .env, virtualenvs) are not present
 in the new workspace, so LSP/builds may not work there; use inplace mode
@@ -570,12 +571,11 @@ workspace. Anywhere else, the most recently saved session is restored.
 reviews, found with `jj workspace list`, the current workspace's first, each
 marked with whether a saved session exists. Picking one restores it (or
 starts its review again). A loaded review of another PR is put aside first:
-its session is saved and its tab closed, its workspace stays. <C-d>
+its session is saved and Neovim |:cd|s out, its workspace stays. <C-d>
 (`review_sessions_delete_key`) removes the selected review: its workspace
 (or inplace review change) and its session.
 
-In workspace mode this reopens the review tab (|:tcd| into the workspace),
-or uses the current tab when Neovim is already in the workspace.
+In workspace mode this |:cd|s into the review workspace.
 
 Session files are stored in:
     ~/.local/share/nvim/github-pr-reviewer-sessions/
