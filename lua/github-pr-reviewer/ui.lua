@@ -118,6 +118,125 @@ function M.select_pr(prs, picker, callback)
   end
 end
 
+-- "<C-d>" -> "ctrl-d", "<M-d>" -> "alt-d" (fzf key names)
+local function fzf_key(key)
+  local mod, k = key:match("^<([CcMmAa])%-(.+)>$")
+  if not mod then
+    return key:lower()
+  end
+  return (mod:lower() == "c" and "ctrl-" or "alt-") .. k:lower()
+end
+
+local function format_review_session(entry)
+  local marks = {}
+  if entry.is_loaded then
+    table.insert(marks, "open")
+  end
+  if entry.is_here then
+    table.insert(marks, "this workspace")
+  end
+  table.insert(marks, entry.has_session and "session" or "no session")
+  return string.format("#%d  %s  [%s]  %s", entry.pr, entry.subject, table.concat(marks, ", "),
+    vim.fn.fnamemodify(entry.root, ":~"))
+end
+
+-- Pick an open review. opts: delete_key and on_delete(entry) to remove the selected review
+function M.select_review_session(entries, picker, on_select, opts)
+  opts = opts or {}
+  local prompt = string.format("Review sessions  [%s: remove]", opts.delete_key or "-")
+
+  if picker == "telescope" and pcall(require, "telescope") then
+    local pickers = require("telescope.pickers")
+    local finders = require("telescope.finders")
+    local conf = require("telescope.config").values
+    local actions = require("telescope.actions")
+    local action_state = require("telescope.actions.state")
+    pickers.new({}, {
+      prompt_title = prompt,
+      finder = finders.new_table({
+        results = entries,
+        entry_maker = function(entry)
+          local display = format_review_session(entry)
+          return { value = entry, display = display, ordinal = display }
+        end,
+      }),
+      sorter = conf.generic_sorter({}),
+      attach_mappings = function(prompt_bufnr, map)
+        actions.select_default:replace(function()
+          local selection = action_state.get_selected_entry()
+          actions.close(prompt_bufnr)
+          if selection then
+            on_select(selection.value)
+          end
+        end)
+        if opts.on_delete and opts.delete_key then
+          local function delete()
+            local selection = action_state.get_selected_entry()
+            actions.close(prompt_bufnr)
+            if selection then
+              vim.schedule(function()
+                opts.on_delete(selection.value)
+              end)
+            end
+          end
+          map("i", opts.delete_key, delete)
+          map("n", opts.delete_key, delete)
+        end
+        return true
+      end,
+    }):find()
+    return
+  end
+
+  local items, by_display = {}, {}
+  for _, entry in ipairs(entries) do
+    local display = format_review_session(entry)
+    table.insert(items, display)
+    by_display[display] = entry
+  end
+
+  if picker == "fzf-lua" then
+    local ok, fzf = pcall(require, "fzf-lua")
+    if ok then
+      local actions = {
+        ["default"] = function(selected)
+          if selected and selected[1] then
+            on_select(by_display[selected[1]])
+          end
+        end,
+      }
+      if opts.on_delete and opts.delete_key then
+        actions[fzf_key(opts.delete_key)] = function(selected)
+          if selected and selected[1] then
+            opts.on_delete(by_display[selected[1]])
+          end
+        end
+      end
+      fzf.fzf_exec(items, { prompt = prompt .. "> ", actions = actions })
+      return
+    end
+  end
+
+  -- Native picker: choose a review, then what to do with it
+  vim.ui.select(items, { prompt = "Review sessions:" }, function(choice)
+    local entry = choice and by_display[choice]
+    if not entry then
+      return
+    end
+    if not opts.on_delete then
+      on_select(entry)
+      return
+    end
+    vim.ui.select({ "Open", "Remove" }, { prompt = "PR #" .. entry.pr .. ":" }, function(action)
+      if action == "Open" then
+        on_select(entry)
+      elseif action == "Remove" then
+        opts.on_delete(entry)
+      end
+    end)
+  end)
+end
+
 local function format_review_request(pr, show_icons)
   local stats = string.format("+%d/-%d", pr.additions, pr.deletions)
   if show_icons then

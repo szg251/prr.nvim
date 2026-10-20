@@ -141,6 +141,12 @@ REVIEW WORKFLOW~
 :PROpen                 Open the current PR in your web browser.
                         Only available in review mode.
 
+                                                     *:PRReviewSessions*
+:PRReviewSessions       List the open reviews of the repository (every
+                        workspace whose working copy is a `pr-review #<N>`
+                        change) and open, switch to, or remove one
+                        (<C-d>). See |github-pr-reviewer-session|.
+
                                                      *:PRLoadLastSession*
 :PRLoadLastSession      Restore the last PR review session after
                         restarting Neovim. Restores PR number, review
@@ -245,6 +251,9 @@ Configure the plugin by calling the setup function: >lua
       -- Key to toggle floating windows visibility
       toggle_floats_key = "<C-r>",
 
+      -- Remove the selected review in the |:PRReviewSessions| picker
+      review_sessions_delete_key = "<C-d>",
+
       -- Commit-based reviewing
       commit_mode_toggle_key = "<C-t>",
       next_commit_key = "<C-n>",
@@ -308,6 +317,13 @@ mark_as_viewed_key      (string, default: "<CR>")
 toggle_floats_key       (string, default: "<C-r>")
                         Key to toggle floating windows visibility. Only
                         works in review mode.
+
+                                                     *github-pr-reviewer.review_sessions_delete_key*
+review_sessions_delete_key (string, default: "<C-d>")
+                        Remove the selected review (workspace, review
+                        change and session) in the |:PRReviewSessions|
+                        picker (telescope, fzf-lua; the native picker asks
+                        Open / Remove).
 
                                                      *github-pr-reviewer.commit_mode_toggle_key*
 commit_mode_toggle_key  (string, default: "<C-t>")
@@ -549,6 +565,14 @@ If the current directory is a review workspace (its working copy is a
 `pr-review #<N>` change), PR N is resumed, even if another PR's session is
 newer; with no saved session for PR N, its review is started again in that
 workspace. Anywhere else, the most recently saved session is restored.
+
+|:PRReviewSessions| (`l` in the menu, `w` during a review) lists all open
+reviews, found with `jj workspace list`, the current workspace's first, each
+marked with whether a saved session exists. Picking one restores it (or
+starts its review again). A loaded review of another PR is put aside first:
+its session is saved and its tab closed, its workspace stays. <C-d>
+(`review_sessions_delete_key`) removes the selected review: its workspace
+(or inplace review change) and its session.
 
 In workspace mode this reopens the review tab (|:tcd| into the workspace),
 or uses the current tab when Neovim is already in the workspace.

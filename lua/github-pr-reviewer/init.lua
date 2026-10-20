@@ -19,6 +19,7 @@ M.config = {
   next_file_key = "<C-l>",        -- key to go to next modified file
   prev_file_key = "<C-h>",        -- key to go to previous modified file
   toggle_floats_key = "<C-r>",    -- toggle floating windows visibility
+  review_sessions_delete_key = "<C-d>", -- remove the selected review in the review sessions picker
   commit_mode_toggle_key = "<C-t>",    -- toggle between the whole PR (file sidebar) and single commits (commit sidebar)
   next_commit_key = "<C-n>",           -- go to next commit (enters commit mode)
   prev_commit_key = "<C-p>",           -- go to previous commit (enters commit mode)
@@ -250,6 +251,19 @@ local function read_session(path)
     return nil
   end
   return session_data
+end
+
+-- Saved session of a PR (also checks the single session file used before sessions were per PR)
+local function read_pr_session(pr_number)
+  local data = read_session(get_session_file(pr_number))
+  if data then
+    return data
+  end
+  local legacy = read_session(session_prefix() .. ".json")
+  if legacy and legacy.pr_number == pr_number then
+    return legacy
+  end
+  return nil
 end
 
 -- Session to restore: the one of the PR checked out in the current directory's workspace (its
@@ -4336,45 +4350,18 @@ function M.show_session_info()
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
 end
 
-function M.load_last_session()
-  if vim.g.pr_review_number then
-    vim.notify("Already in review mode.", vim.log.levels.INFO)
-    -- Just open the review buffer
-    M.open_review_buffer()
-    return
-  end
-
-  local session_data, workspace_pr = find_session()
-
-  if not session_data then
-    if workspace_pr then
-      -- This workspace has a review change but no saved session: start the review from here
-      vim.notify("No saved session for PR #" .. workspace_pr .. ", starting its review...", vim.log.levels.INFO)
-      local in_secondary_workspace = jj.root(vim.fn.getcwd()) ~= jj.workspaces().default
-      github.get_pr_for_review(workspace_pr, function(pr, err)
-        if not pr then
-          vim.notify("Error getting PR #" .. workspace_pr .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
-          return
-        end
-        M._do_start_review(pr, in_secondary_workspace and "workspace" or nil)
-      end)
-      return
-    end
-    vim.notify("No saved session found for this project", vim.log.levels.INFO)
-    return
-  end
-
-  -- Verify the session belongs to this repository
+-- Restore a saved review session. Returns false if its review change is gone
+local function restore_session(session_data)
   if session_data.repo_id and session_data.repo_id ~= jj.repo_id() then
     vim.notify("Session is for a different repository: " .. session_data.repo_id, vim.log.levels.WARN)
-    return
+    return false
   end
 
   -- Check that the review change still exists where the session says it is
   local root = session_data.root or vim.fn.getcwd()
   if vim.fn.isdirectory(root) == 0 or not jj.current_review_pr(root) then
     vim.notify("No review change found in " .. root .. ". Use :PR to start a new review.", vim.log.levels.WARN)
-    return
+    return false
   end
 
   vim.notify("Restoring review session for PR #" .. session_data.pr_number .. "...", vim.log.levels.INFO)
@@ -4424,6 +4411,42 @@ function M.load_last_session()
   end)
 
   vim.notify("✅ Session restored for PR #" .. session_data.pr_number, vim.log.levels.INFO)
+  return true
+end
+
+-- A review change without a saved session: start the review of that PR again where it is
+-- (a secondary workspace is reused in workspace mode; the default workspace means inplace)
+local function resume_without_session(pr_number, root)
+  vim.notify("No saved session for PR #" .. pr_number .. ", starting its review...", vim.log.levels.INFO)
+  local secondary = root ~= jj.workspaces().default
+  if not secondary then
+    jj.cwd = root
+  end
+  github.get_pr_for_review(pr_number, function(pr, err)
+    if not pr then
+      vim.notify("Error getting PR #" .. pr_number .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
+      return
+    end
+    M._do_start_review(pr, secondary and "workspace" or "inplace")
+  end)
+end
+
+function M.load_last_session()
+  if vim.g.pr_review_number then
+    vim.notify("Already in review mode.", vim.log.levels.INFO)
+    -- Just open the review buffer
+    M.open_review_buffer()
+    return
+  end
+
+  local session_data, workspace_pr = find_session()
+  if session_data then
+    restore_session(session_data)
+  elseif workspace_pr then
+    resume_without_session(workspace_pr, jj.root(vim.fn.getcwd()))
+  else
+    vim.notify("No saved session found for this project", vim.log.levels.INFO)
+  end
 end
 
 function M.show_pr_info()
@@ -5033,6 +5056,10 @@ function M.setup(opts)
     M.open_pr()
   end, { desc = "Open PR in browser" })
 
+  vim.api.nvim_create_user_command("PRReviewSessions", function()
+    M.review_sessions()
+  end, { desc = "List open reviews (review workspaces) and open or remove one" })
+
   vim.api.nvim_create_user_command("PRLoadLastSession", function()
     M.load_last_session()
   end, { desc = "Load last PR review session" })
@@ -5543,6 +5570,55 @@ function M.refresh_pr_branch()
   })
 end
 
+-- Forget the loaded review in this Neovim (state, sidebar, floats, comment marks, keymaps);
+-- doesn't touch jj or the session file
+local function reset_review_state()
+  stop_update_polling()
+  vim.g.pr_review_number = nil
+  vim.g.pr_review_base_branch = nil
+  vim.g.pr_review_merge_base = nil
+  vim.g.pr_review_change = nil
+  vim.g.pr_review_previous_change = nil
+  vim.g.pr_review_modified_files = nil
+  vim.g.pr_review_mode = nil
+  vim.g.pr_review_root = nil
+  vim.g.pr_review_main_root = nil
+  vim.g.pr_review_workspace = nil
+  jj.cwd = nil
+  github.clear_cache()
+  M._buffer_comments = {}
+  M._buffer_changes = {}
+  M._buffer_hunks = {}
+  M._viewed_files = {}
+  M._viewed_commit_files = {}
+  M._commits = nil
+  M._commit_mode = false
+  M._current_commit = nil
+  M._expanded_commits = {}
+  github.comment_commit_id = nil
+  M._buffer_jumped = {}
+  M._buffer_keymaps_saved = {}
+  M._review_files = {}
+  M._review_files_ordered = {}
+  M._review_filter = "all"
+  M._local_pending_comments = {}
+  if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
+    pcall(vim.api.nvim_win_close, M._review_window, true)
+  end
+  M._review_window = nil
+  M._review_buffer = nil
+  close_float_wins()
+
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_clear_namespace(buf, ns_id, 0, -1)
+      -- Delete buffer-local keymaps
+      pcall(vim.keymap.del, "n", M.config.mark_as_viewed_key, { buffer = buf })
+      pcall(vim.keymap.del, "n", M.config.toggle_floats_key, { buffer = buf })
+    end
+  end
+end
+
 -- Where the review to clean up lives when no review is loaded in this Neovim (e.g. :PRReviewCleanup
 -- right after starting Neovim in a review workspace): from the PR's saved session, else from jj
 local function detect_review_location(pr_number)
@@ -5629,56 +5705,138 @@ function M.cleanup_review_branch()
   jj.cleanup_review(cleanup_state, function(ok, err, target)
     if ok then
       delete_session()
-      stop_update_polling()
-      vim.g.pr_review_number = nil
-      vim.g.pr_review_base_branch = nil
-      vim.g.pr_review_merge_base = nil
-      vim.g.pr_review_change = nil
-      vim.g.pr_review_previous_change = nil
-      vim.g.pr_review_modified_files = nil
-      vim.g.pr_review_mode = nil
-      vim.g.pr_review_root = nil
-      vim.g.pr_review_main_root = nil
-      vim.g.pr_review_workspace = nil
-      jj.cwd = nil
-      github.clear_cache()
-      M._buffer_comments = {}
-      M._buffer_changes = {}
-      M._buffer_hunks = {}
-      M._viewed_files = {}
-      M._viewed_commit_files = {}
-      M._commits = nil
-      M._commit_mode = false
-      M._current_commit = nil
-      M._expanded_commits = {}
-      github.comment_commit_id = nil
-      M._buffer_jumped = {}
-      M._buffer_keymaps_saved = {}
-      M._review_files = {}
-      M._review_files_ordered = {}
-      M._review_filter = "all"
-      M._local_pending_comments = {}
-      if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
-        vim.api.nvim_win_close(M._review_window, true)
-      end
-      M._review_window = nil
-      M._review_buffer = nil
-      close_float_wins()
-
-      for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_valid(buf) then
-          vim.api.nvim_buf_clear_namespace(buf, ns_id, 0, -1)
-          -- Delete buffer-local keymaps
-          pcall(vim.keymap.del, "n", M.config.mark_as_viewed_key, { buffer = buf })
-          pcall(vim.keymap.del, "n", M.config.toggle_floats_key, { buffer = buf })
-        end
-      end
+      reset_review_state()
 
       vim.notify("Cleaned up review change, back on: " .. target, vim.log.levels.INFO)
     else
       vim.notify("Error cleaning up: " .. (err or "unknown"), vim.log.levels.ERROR)
     end
   end)
+end
+
+-- ===== Open review sessions: every workspace whose working copy is a review change =====
+
+-- Delete a review's buffers that live in root (unmodified ones only unless force)
+local function wipe_buffers_under(root, force)
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
+    if root and name:sub(1, #root + 1) == root .. "/" and (force or not vim.bo[buf].modified) then
+      pcall(vim.api.nvim_buf_delete, buf, { force = force })
+    end
+  end
+end
+
+-- Put the loaded review aside without cleaning it up: save its session, close its tab and state.
+-- Its workspace and review change stay, so it can be opened again later.
+function M._unload_review()
+  if not vim.g.pr_review_number then
+    return
+  end
+  save_session()
+  if vim.g.pr_review_mode == "workspace" then
+    wipe_buffers_under(vim.g.pr_review_root, false)
+    if M._review_tab and vim.api.nvim_tabpage_is_valid(M._review_tab) and #vim.api.nvim_list_tabpages() > 1 then
+      vim.api.nvim_set_current_tabpage(M._review_tab)
+      pcall(vim.cmd, "tabclose")
+    end
+  end
+  M._review_tab = nil
+  reset_review_state()
+end
+
+-- Open a review from the sessions list, switching away from the loaded one if needed
+function M._open_review_session(entry)
+  if vim.g.pr_review_number == entry.pr then
+    if vim.g.pr_review_mode == "workspace" and vim.g.pr_review_root then
+      open_review_tab(vim.g.pr_review_root)
+    end
+    M.open_review_buffer()
+    return
+  end
+  M._unload_review()
+
+  local session_data = read_pr_session(entry.pr)
+  if session_data then
+    session_data.root = entry.root
+    restore_session(session_data)
+  else
+    resume_without_session(entry.pr, entry.root)
+  end
+end
+
+-- Remove a review from the sessions list: its workspace (or inplace review change) and session
+function M._remove_review_session(entry, done)
+  if vim.g.pr_review_number == entry.pr then
+    M.cleanup_review_branch()
+    return
+  end
+  local choice = vim.fn.confirm(string.format("Remove the review of PR #%d (%s)?", entry.pr,
+    vim.fn.fnamemodify(entry.root, ":~")), "&Yes\n&No", 2)
+  if choice ~= 1 then
+    return
+  end
+
+  local workspaces = jj.workspaces()
+  local secondary = entry.name ~= "default"
+  local session_data = read_pr_session(entry.pr)
+  local change = jj.current_change(entry.root)
+  if secondary then
+    wipe_buffers_under(entry.root, true)
+  end
+  jj.cleanup_review({
+    mode = secondary and "workspace" or "inplace",
+    review_change = change and change.change_id,
+    workspace = secondary and entry.name or nil,
+    main_root = secondary and workspaces.default or entry.root,
+    previous = session_data and session_data.previous_change,
+  }, function(ok, err)
+    if ok then
+      vim.fn.delete(get_session_file(entry.pr))
+      vim.notify("Removed the review of PR #" .. entry.pr, vim.log.levels.INFO)
+    else
+      vim.notify("Error removing the review of PR #" .. entry.pr .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
+    end
+    if done then
+      done()
+    end
+  end)
+end
+
+-- List the open reviews of this repository and open (or remove) one
+function M.review_sessions()
+  local entries = jj.review_workspaces()
+  if #entries == 0 then
+    vim.notify("No open reviews in this repository", vim.log.levels.INFO)
+    return
+  end
+
+  local here = jj.root(vim.fn.getcwd())
+  for _, entry in ipairs(entries) do
+    entry.has_session = read_pr_session(entry.pr) ~= nil
+    entry.is_here = entry.root == here
+    entry.is_loaded = vim.g.pr_review_number == entry.pr
+  end
+  -- The review of the current workspace first, then by PR number
+  table.sort(entries, function(a, b)
+    if a.is_here ~= b.is_here then
+      return a.is_here
+    end
+    return a.pr < b.pr
+  end)
+
+  if #entries == 1 and not vim.g.pr_review_number then
+    M._open_review_session(entries[1])
+    return
+  end
+
+  ui.select_review_session(entries, M.config.picker, M._open_review_session, {
+    delete_key = M.config.review_sessions_delete_key,
+    on_delete = function(entry)
+      M._remove_review_session(entry, function()
+        vim.schedule(M.review_sessions)
+      end)
+    end,
+  })
 end
 
 -- Menu buffer state
@@ -5842,11 +6000,8 @@ function M.show_review_menu()
   local in_review_mode = vim.g.pr_review_number ~= nil
 
   -- Check if there's a saved session
-  local session_data, workspace_pr = nil, nil
-  if not in_review_mode then
-    session_data, workspace_pr = find_session()
-  end
-  local has_session = session_data ~= nil or workspace_pr ~= nil
+  local open_reviews = in_review_mode and {} or jj.review_workspaces()
+  local has_session = #open_reviews > 0
 
   -- Define menu sections based on mode
   local sections = {}
@@ -5859,8 +6014,9 @@ function M.show_review_menu()
 
     -- If has session, make Load the primary option (l key); review requests always come second
     if has_session then
-      local load_desc = workspace_pr and ("Resume PR #" .. workspace_pr .. " (this workspace)") or "Load Last Session"
-      table.insert(items, { key = "l", desc = load_desc, cmd = function() M.load_last_session() end })
+      local sessions_desc = #open_reviews == 1 and ("Resume PR #" .. open_reviews[1].pr)
+          or string.format("Review Sessions (%d)", #open_reviews)
+      table.insert(items, { key = "l", desc = sessions_desc, cmd = function() M.review_sessions() end })
       table.insert(items, review_requests)
       table.insert(items, { key = "p", desc = "List Pull Requests",             cmd = function() M.review_pr() end })
     else
@@ -5893,6 +6049,7 @@ function M.show_review_menu()
         items = {
           { key = "b", desc = "Toggle Review Buffer", cmd = function() M.toggle_review_buffer() end },
           { key = "f", desc = "Refresh PR Branch",    cmd = function() M.refresh_pr_branch() end },
+          { key = "w", desc = "Review Sessions",      cmd = function() M.review_sessions() end },
         }
       },
       {

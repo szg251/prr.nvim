@@ -181,6 +181,26 @@ function M.workspaces()
   return result
 end
 
+-- Open reviews: workspaces whose working copy is a review change ("pr-review #<N>: ...").
+-- Returns { { pr, name, root, subject } }, subject being the description after the prefix
+function M.review_workspaces()
+  local template = 'name ++ "\\t" ++ root ++ "\\t" ++ target.description().first_line() ++ "\\n"'
+  local ok, out = run({ "workspace", "list", "--ignore-working-copy", "-T", template })
+  local reviews = {}
+  if not ok then
+    return reviews
+  end
+  local prefix = vim.pesc(M.review_description_prefix)
+  for line in out:gmatch("[^\n]+") do
+    local name, root, description = line:match("^([^\t]*)\t([^\t]*)\t(.*)$")
+    local pr, subject = (description or ""):match("^" .. prefix .. "(%d+):?%s*(.*)$")
+    if pr then
+      table.insert(reviews, { pr = tonumber(pr), name = name, root = root, subject = subject })
+    end
+  end
+  return reviews
+end
+
 -- Default location of a review workspace: <repo-root>/../<repo-name>-pr-<number>
 function M.default_workspace_path(repo_root, pr_number)
   return string.format("%s/%s-pr-%d", vim.fn.fnamemodify(repo_root, ":h"), vim.fn.fnamemodify(repo_root, ":t"), pr_number)
