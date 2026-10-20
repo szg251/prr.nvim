@@ -712,6 +712,50 @@ local function group_files_by_directory(files)
   return grouped
 end
 
+-- Sidebar selection: the entry under the cursor gets a background (all lines of a wrapped entry)
+local selection_ns = vim.api.nvim_create_namespace("pr_review_selection")
+
+local function sidebar_item_key(item)
+  if type(item) ~= "table" then
+    return nil
+  elseif item.is_commit then
+    return "commit:" .. item.commit.id
+  elseif item.is_commit_file then
+    return "commit_file:" .. item.commit.id .. ":" .. item.path
+  elseif item.is_directory then
+    return "dir:" .. item.path
+  end
+  return "file:" .. tostring(item.path)
+end
+
+local function update_sidebar_selection()
+  local buf, win = M._review_buffer, M._review_window
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(buf, selection_ns, 0, -1)
+  if not win or not vim.api.nvim_win_is_valid(win) or vim.api.nvim_win_get_buf(win) ~= buf then
+    return
+  end
+
+  local line = vim.api.nvim_win_get_cursor(win)[1]
+  local map = vim.b[buf].pr_file_map
+  local key = type(map) == "table" and sidebar_item_key(map[line]) or nil
+  local first, last = line, line
+  if key then
+    while first > 1 and sidebar_item_key(map[first - 1]) == key do
+      first = first - 1
+    end
+    local count = vim.api.nvim_buf_line_count(buf)
+    while last < count and sidebar_item_key(map[last + 1]) == key do
+      last = last + 1
+    end
+  end
+  for l = first, last do
+    vim.api.nvim_buf_set_extmark(buf, selection_ns, l - 1, 0, { line_hl_group = "PRReviewSelection", priority = 10 })
+  end
+end
+
 -- Apply lines, highlights and the line -> item map to the review buffer
 local function set_review_buffer_content(lines, highlights, file_map)
   vim.bo[M._review_buffer].modifiable = true
@@ -725,6 +769,7 @@ local function set_review_buffer_content(lines, highlights, file_map)
   end
 
   vim.b[M._review_buffer].pr_file_map = file_map
+  update_sidebar_selection()
 end
 
 -- Word-wrap text to lines of at most width display cells (long words are split)
@@ -813,7 +858,7 @@ local function render_commit_sidebar()
     end
     local arrow = expanded and (icons and "▾" or "-") or (icons and "▸" or "+")
     local check = viewed == total and (icons and "✓" or "[V]") or (icons and "○" or "[ ]")
-    local hl = is_current and "CursorLine" or (viewed == total and "Comment" or nil)
+    local hl = is_current and "PRReviewCurrent" or (viewed == total and "Comment" or nil)
     local item = { is_commit = true, commit = commit }
 
     -- Metadata first so it never clips; the subject wraps under itself (hanging indent)
@@ -952,7 +997,7 @@ local function render_review_buffer()
           -- Highlight based on status or if current file
           if current_file_path and file.path == current_file_path then
             -- Highlight entire line for current file
-            table.insert(highlights, { line = line_idx - 1, hl_group = "CursorLine" })
+            table.insert(highlights, { line = line_idx - 1, hl_group = "PRReviewCurrent" })
             -- Highlight filename with special color
             table.insert(highlights,
               { line = line_idx - 1, hl_group = "Search", start_col = filename_start, end_col = filename_end })
@@ -1003,7 +1048,7 @@ local function render_review_buffer()
       -- Highlight based on status or if current file
       if current_file_path and file.path == current_file_path then
         -- Highlight entire line for current file
-        table.insert(highlights, { line = line_idx - 1, hl_group = "CursorLine" })
+        table.insert(highlights, { line = line_idx - 1, hl_group = "PRReviewCurrent" })
         -- Highlight filepath with special color
         table.insert(highlights,
           { line = line_idx - 1, hl_group = "Search", start_col = filepath_start, end_col = filepath_end })
@@ -1042,6 +1087,7 @@ local function render_review_buffer()
 
   -- Store file map in buffer variable
   vim.b[M._review_buffer].pr_file_map = file_map
+  update_sidebar_selection()
 end
 
 -- Helper to open a file (including deleted files)
@@ -1211,6 +1257,13 @@ end
 -- Setup keymaps for review buffer
 local function setup_review_buffer_keymaps(bufnr)
   local cfg = M.config.review_buffer
+
+  -- Selection background follows the cursor
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = vim.api.nvim_create_augroup("PRReviewSidebarSelection", { clear = true }),
+    buffer = bufnr,
+    callback = update_sidebar_selection,
+  })
 
   -- Store the callback in a global table so it can be called
   _G._pr_reviewer_open_file = function()
@@ -1400,6 +1453,7 @@ function M.open_review_buffer(callback, files_loaded)
     -- Return to previous window
     vim.cmd("wincmd p")
   end
+  update_sidebar_selection()
 
   -- Call callback if provided
   if callback then
@@ -4820,8 +4874,20 @@ function M._do_start_review(pr, mode_override)
   end)
 end
 
+-- Highlight groups (default = true, so colorschemes and users can override them)
+local function define_highlights()
+  vim.api.nvim_set_hl(0, "PRReviewSelection", { link = "CursorLine", default = true }) -- sidebar entry under the cursor
+  vim.api.nvim_set_hl(0, "PRReviewCurrent", { bold = true, default = true })          -- open file / reviewed commit
+end
+
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+
+  define_highlights()
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = vim.api.nvim_create_augroup("PRReviewHighlights", { clear = true }),
+    callback = define_highlights,
+  })
 
   vim.api.nvim_create_user_command("PRReview", function()
     M.review_pr()

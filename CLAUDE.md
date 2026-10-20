@@ -248,12 +248,10 @@ M.config = {
 
 ### Highlight Groups
 
-Defined in setup:
+Defined in setup by `define_highlights()` (with `default = true`, re-applied on `ColorScheme`):
 ```lua
-- PRReviewFile (links to Directory)
-- PRReviewViewed (links to Comment)
-- PRReviewCurrent (links to CursorLine)
-- PRReviewStats (links to String)
+- PRReviewSelection (links to CursorLine) -- sidebar entry under the cursor, all lines of a wrapped entry (update_sidebar_selection)
+- PRReviewCurrent (bold)                  -- open file / reviewed commit in the sidebar
 ```
 
 ## Debugging Tips

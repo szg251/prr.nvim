@@ -341,10 +341,11 @@ Features:
 - **✓** = File has been marked as viewed
 - **○** = File not yet viewed
 - Shows additions/deletions for each file
-- Press `<CR>` on a file to open it
-- Press `v` to toggle viewed status
+- Press `<CR>` on a file to open it (`s` / `v` open it in a split / vertical split); double click works too
+- Press `m` to mark a file viewed
 - Press `q` to close
 - Automatically refreshes as you mark files viewed
+- The entry under the cursor gets a selection background (`PRReviewSelection`, linked to `CursorLine`); the open file / reviewed commit is bold (`PRReviewCurrent`). Override either with `vim.api.nvim_set_hl`
 
 ### Navigating Changes
 
