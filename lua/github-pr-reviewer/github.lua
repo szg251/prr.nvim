@@ -498,7 +498,7 @@ function M.fetch_pr_comments(pr_number, callback)
   end
 
   local cmd = string.format(
-    "gh api repos/{owner}/{repo}/pulls/%d/comments --jq '.[] | {id: .id, path: .path, line: (.line // .original_line), body: .body, user: .user.login, created_at: .created_at, in_reply_to_id: .in_reply_to_id}'",
+    "gh api repos/{owner}/{repo}/pulls/%d/comments --jq '.[] | {id: .id, path: .path, line: (.line // .original_line), original_line: .original_line, original_commit_id: .original_commit_id, body: .body, user: .user.login, created_at: .created_at, in_reply_to_id: .in_reply_to_id}'",
     pr_number
   )
 
@@ -524,10 +524,21 @@ function M.fetch_pr_comments(pr_number, callback)
               line_num = nil
             end
 
+            local original_line = comment.original_line
+            if type(original_line) ~= "number" then
+              original_line = nil
+            end
+            local original_commit_id = comment.original_commit_id
+            if type(original_commit_id) ~= "string" then
+              original_commit_id = nil
+            end
+
             table.insert(comments, {
               id = comment.id,
               path = comment.path,
               line = line_num,
+              original_line = original_line,
+              original_commit_id = original_commit_id,
               body = comment.body,
               user = comment.user,
               created_at = comment.created_at,
@@ -793,8 +804,15 @@ function M.add_pr_comment(pr_number, body, callback)
   })
 end
 
+-- Commit that new single review comments are attached to; nil means the PR head.
+-- Set while reviewing a single commit (commit mode).
+M.comment_commit_id = nil
+
 function M.add_review_comment(pr_number, path, line, body, callback, start_line)
   local get_head_cmd = string.format("gh pr view %d --json headRefOid --jq '.headRefOid'", pr_number)
+  if M.comment_commit_id then
+    get_head_cmd = "echo " .. M.comment_commit_id
+  end
 
   vim.fn.jobstart(get_head_cmd, {
     stdout_buffered = true,

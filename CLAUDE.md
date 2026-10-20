@@ -322,6 +322,15 @@ Diffs are against the merge-base of the PR head and the base branch: `heads(::he
 - **File list**: `jj diff --from <merge-base> --to @` with a template. Renames appear as delete + add; there is no "untracked" status.
 - **Hunks**: `vim.diff` (xdiff, git-compatible unified format, 0 context) between base content and the file on disk.
 
+### Commit Mode (commit-based reviewing)
+
+- `M._commits` (from `jj.pr_commits(merge_base, head)`: oldest first, each `{ id, short, subject, parent, is_merge, files }`) is loaded by `load_commits()` at review start, refresh and session restore. `vim.g.pr_review_head` holds the PR head commit.
+- `M.goto_commit(id)` runs `jj.move_review_change(commit, desc)` (`jj new <commit>` + abandon the old review change), sets `M._commit_mode`/`M._current_commit` and calls `reload_review_view()`, which re-reads buffers under the review root, rebuilds the file list and reopens the file. `M.exit_commit_mode()` does the same with the PR head.
+- Use `current_commit()`, `diff_base_rev()` (merge-base or the commit's parent) and `diff_for_file()` (`jj.diff_file` vs `jj.diff_commit_file`) instead of reading `vim.g.pr_review_merge_base` directly.
+- Viewed state: `M._viewed_commit_files[commit_id][path]`, with `M._viewed_files[path]` derived (viewed in every commit touching it, see `sync_pr_viewed`). Always go through `is_file_viewed()` / `set_file_viewed()`.
+- The sidebar has two views (`M._sidebar_view` = "files" | "commits"); `render_commit_sidebar()` stores `{ is_commit }` / `{ is_commit_file }` items in `pr_file_map`.
+- Comments: in commit mode only comments with `original_commit_id == current commit` are shown at `original_line`; `github.comment_commit_id` makes new single comments target that commit; pending comments are blocked.
+
 ### Fetching Base Content
 
 `jj file show -r <rev> <file>`. Split view tries in order:

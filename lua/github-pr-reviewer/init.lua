@@ -23,6 +23,10 @@ M.config = {
   prev_file_key = "<C-h>",        -- key to go to previous modified file
   diff_view_toggle_key = "<C-v>", -- toggle between unified and split diff view
   toggle_floats_key = "<C-r>",    -- toggle floating windows visibility
+  commit_mode_toggle_key = "<C-t>",    -- toggle between reviewing the whole PR and single commits
+  next_commit_key = "<C-n>",           -- go to next commit (enters commit mode)
+  prev_commit_key = "<C-p>",           -- go to previous commit (enters commit mode)
+  commit_sidebar_toggle_key = "<C-b>", -- switch the sidebar between files and commits
 
   -- Review buffer settings
   review_buffer = {
@@ -58,6 +62,12 @@ M._diff_view_mode = "unified" -- "unified" or "split"
 M._split_view_state = {}      -- tracks split view buffers and windows
 M._buffer_stats = {}
 M._viewed_files = {}
+M._viewed_commit_files = {}  -- commit id -> { path -> true }: viewed per commit (commit mode)
+M._commits = nil             -- PR commits, oldest first (see jj.pr_commits)
+M._commit_mode = false       -- reviewing a single commit instead of the whole PR
+M._current_commit = nil      -- commit id reviewed in commit mode
+M._sidebar_view = "files"    -- "files" | "commits"
+M._expanded_commits = {}     -- commit id -> bool, expansion state in the commit sidebar
 M._collapsed_dirs = {}         -- tracks which directories are collapsed in review buffer
 M._local_pending_comments = {} -- Local storage for pending comments (not synced to GitHub yet)
 M._drafts = {}                 -- Draft comments being edited (auto-saved)
@@ -101,6 +111,7 @@ local function set_review_location(state)
   vim.g.pr_review_main_root = state.main_root
   vim.g.pr_review_workspace = state.workspace
   vim.g.pr_review_merge_base = state.merge_base
+  vim.g.pr_review_head = state.head
   vim.g.pr_review_change = state.review_change
   jj.cwd = state.root
 end
@@ -114,6 +125,111 @@ local function open_review_tab(root)
     M._review_tab = vim.api.nvim_get_current_tabpage()
   end
   vim.cmd("tcd " .. vim.fn.fnameescape(root))
+end
+
+-- The commit reviewed in commit mode (nil in PR mode) and its index in M._commits
+local function current_commit()
+  if not M._commit_mode or not M._commits then
+    return nil
+  end
+  for i, commit in ipairs(M._commits) do
+    if commit.id == M._current_commit then
+      return commit, i
+    end
+  end
+  return nil
+end
+
+-- Revision whose content the diff is computed against
+local function diff_base_rev()
+  local commit = current_commit()
+  if commit then
+    return commit.parent
+  end
+  return vim.g.pr_review_merge_base
+end
+
+-- Zero-context diff of a review file in the current mode. callback(lines)
+local function diff_for_file(path, callback)
+  local commit = current_commit()
+  if commit then
+    jj.diff_commit_file(commit.id, path, callback)
+  else
+    jj.diff_file(vim.g.pr_review_merge_base, path, callback)
+  end
+end
+
+local function commit_touches(commit, path)
+  for _, f in ipairs(commit.files) do
+    if f.path == path then
+      return true
+    end
+  end
+  return false
+end
+
+-- A file is viewed in the PR once it is viewed in every commit that changes it
+local function sync_pr_viewed(path)
+  if not M._commits then
+    return
+  end
+  local touched, all_viewed = false, true
+  for _, commit in ipairs(M._commits) do
+    if commit_touches(commit, path) then
+      touched = true
+      if not (M._viewed_commit_files[commit.id] or {})[path] then
+        all_viewed = false
+      end
+    end
+  end
+  if touched then
+    M._viewed_files[path] = all_viewed
+  end
+end
+
+-- Viewed state of a file in the current mode (or in the given commit)
+local function is_file_viewed(path, commit_id)
+  commit_id = commit_id or (current_commit() or {}).id
+  if commit_id then
+    return (M._viewed_commit_files[commit_id] or {})[path] or false
+  end
+  return M._viewed_files[path] or false
+end
+
+-- Mark a file (un)viewed. In commit mode (or with commit_id) only that commit's changes to the
+-- file are affected; in PR mode the file is (un)marked in every commit that changes it.
+local function set_file_viewed(path, viewed, commit_id)
+  commit_id = commit_id or (current_commit() or {}).id
+  local commits = {}
+  if commit_id then
+    commits = { commit_id }
+  elseif M._commits then
+    for _, commit in ipairs(M._commits) do
+      if commit_touches(commit, path) then
+        table.insert(commits, commit.id)
+      end
+    end
+  end
+  for _, id in ipairs(commits) do
+    M._viewed_commit_files[id] = M._viewed_commit_files[id] or {}
+    M._viewed_commit_files[id][path] = viewed or nil
+  end
+  if commit_id then
+    sync_pr_viewed(path)
+  else
+    M._viewed_files[path] = viewed
+  end
+end
+
+-- Viewed files / total files of a commit
+local function commit_progress(commit)
+  local viewed = 0
+  for _, f in ipairs(commit.files) do
+    if is_file_viewed(f.path, commit.id) then
+      viewed = viewed + 1
+    end
+  end
+  return viewed, #commit.files
 end
 
 local function get_session_file()
@@ -140,6 +256,10 @@ local function save_session()
     previous_change = vim.g.pr_review_previous_change,
     modified_files = vim.g.pr_review_modified_files,
     viewed_files = M._viewed_files,
+    viewed_commit_files = M._viewed_commit_files,
+    head = vim.g.pr_review_head,
+    commit_mode = M._commit_mode,
+    current_commit = M._current_commit,
     pending_comments = M._local_pending_comments,
     drafts = M._drafts,
     cwd = vim.fn.getcwd(),
@@ -184,6 +304,7 @@ end
 
 -- Forward declarations
 local get_inline_diff
+local load_commits
 
 -- Local pending comments management (stored locally, not on GitHub)
 local function generate_local_comment_id()
@@ -325,13 +446,13 @@ end
 
 -- Collect all files from PR with their metadata
 local function collect_pr_files(callback)
-  jj.changed_files(vim.g.pr_review_merge_base, function(changed)
+  local function with_files(changed)
     local files = {}
     for _, f in ipairs(changed) do
       table.insert(files, {
         path = f.path,
         status = f.status, -- M=modified, A=added, D=deleted
-        viewed = M._viewed_files[f.path] or false,
+        viewed = is_file_viewed(f.path),
         stats = { additions = 0, modifications = 0, deletions = 0 },
       })
     end
@@ -382,7 +503,15 @@ local function collect_pr_files(callback)
         end
       end)
     end
-  end)
+  end
+
+  -- In commit mode the files are the ones changed by the current commit
+  local commit = current_commit()
+  if commit then
+    with_files(commit.files)
+  else
+    jj.changed_files(vim.g.pr_review_merge_base, with_files)
+  end
 end
 
 local function get_relative_path(bufnr)
@@ -399,7 +528,7 @@ local function get_relative_path(bufnr)
 end
 
 local function get_changed_lines_for_file(file_path, status, callback)
-  jj.diff_file(vim.g.pr_review_merge_base, file_path, function(data)
+  diff_for_file(file_path, function(data)
     local all_lines = {}
     if data then
       for _, line in ipairs(data) do
@@ -450,7 +579,7 @@ end
 local update_changes_float
 
 get_inline_diff = function(file_path, status, callback)
-  jj.diff_file(vim.g.pr_review_merge_base, file_path, function(data)
+  diff_for_file(file_path, function(data)
     if not data then
       vim.schedule(function()
         callback({})
@@ -586,6 +715,9 @@ local function load_inline_diff_for_buffer(bufnr)
   end
 
   get_inline_diff(file_path, status, function(hunks)
+    if not vim.api.nvim_buf_is_valid(bufnr) or not vim.g.pr_review_number then
+      return
+    end
     if hunks and #hunks > 0 then
       -- Calculate stats
       local additions = 0
@@ -652,9 +784,9 @@ local function create_split_view(current_bufnr, file_path)
   local base_branch = vim.g.pr_review_base_branch
   local attempts = {}
 
-  -- Prefer merge-base (exact common ancestor, matches GitHub's diff base)
-  if vim.g.pr_review_merge_base then
-    table.insert(attempts, vim.g.pr_review_merge_base)
+  -- Prefer the diff base: merge-base (matches GitHub's diff base), or the commit's parent in commit mode
+  if diff_base_rev() then
+    table.insert(attempts, diff_base_rev())
   end
   if base_branch then
     table.insert(attempts, string.format('remote_bookmarks(exact:"%s", exact:"origin")', base_branch))
@@ -915,9 +1047,155 @@ local function group_files_by_directory(files)
   return grouped
 end
 
+-- Apply lines, highlights and the line -> item map to the review buffer
+local function set_review_buffer_content(lines, highlights, file_map)
+  vim.bo[M._review_buffer].modifiable = true
+  vim.api.nvim_buf_set_lines(M._review_buffer, 0, -1, false, lines)
+  vim.bo[M._review_buffer].modifiable = false
+
+  local ns = vim.api.nvim_create_namespace("pr_review_buffer")
+  vim.api.nvim_buf_clear_namespace(M._review_buffer, ns, 0, -1)
+  for _, hl in ipairs(highlights) do
+    vim.api.nvim_buf_add_highlight(M._review_buffer, ns, hl.hl_group, hl.line, hl.start_col or 0, hl.end_col or -1)
+  end
+
+  vim.b[M._review_buffer].pr_file_map = file_map
+end
+
+-- Word-wrap text to lines of at most width display cells (long words are split)
+local function wrap_words(text, width)
+  local result, line = {}, ""
+  for w in text:gmatch("%S+") do
+    local word = w
+    while vim.fn.strdisplaywidth(word) > width do
+      if line ~= "" then
+        table.insert(result, line)
+        line = ""
+      end
+      local n = vim.fn.strcharlen(word)
+      local cut = n
+      while cut > 1 and vim.fn.strdisplaywidth(vim.fn.strcharpart(word, 0, cut)) > width do
+        cut = cut - 1
+      end
+      table.insert(result, vim.fn.strcharpart(word, 0, cut))
+      word = vim.fn.strcharpart(word, cut)
+    end
+    if line == "" then
+      line = word
+    elseif vim.fn.strdisplaywidth(line) + 1 + vim.fn.strdisplaywidth(word) <= width then
+      line = line .. " " .. word
+    else
+      table.insert(result, line)
+      line = word
+    end
+  end
+  if line ~= "" or #result == 0 then
+    table.insert(result, line)
+  end
+  return result
+end
+
+-- Render the commit sidebar: a tree of the PR's commits and the files each one changes
+local function render_commit_sidebar()
+  local icons = M.config.show_icons
+  local current_file_path = get_relative_path(vim.api.nvim_get_current_buf())
+  local current = current_commit()
+  local lines, highlights, file_map = {}, {}, {}
+  local function add(line, hl_group)
+    table.insert(lines, line)
+    if hl_group then
+      table.insert(highlights, { line = #lines - 1, hl_group = hl_group })
+    end
+    return #lines
+  end
+
+  -- Usable width of the sidebar window (it doesn't wrap lines)
+  local width = M.config.review_buffer.width
+  if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
+    width = vim.api.nvim_win_get_width(M._review_window)
+  end
+  width = width - 1
+
+  local commits = M._commits or {}
+  local viewed_commits = 0
+  for _, commit in ipairs(commits) do
+    local viewed, total = commit_progress(commit)
+    if viewed == total then
+      viewed_commits = viewed_commits + 1
+    end
+  end
+
+  local cfg = M.config.review_buffer
+  add("═══ PR Commits ═══")
+  add("")
+  add(string.format("[%s] Files | [%s] Toggle | [q] Close", M.config.commit_sidebar_toggle_key, cfg.toggle_key))
+  add("Open: [<CR>] Commit/File  [m] Mark viewed")
+  add(string.format("Mode: %s | %d/%d commits viewed", M._commit_mode and "commit" or "PR", viewed_commits, #commits))
+  add("")
+  if not M._commits then
+    add("Loading commits...", "Comment")
+  end
+
+  -- Files of the current commit are the navigation order for next/prev file
+  M._review_files_ordered = {}
+
+  for _, commit in ipairs(commits) do
+    local viewed, total = commit_progress(commit)
+    local is_current = current and current.id == commit.id
+    local expanded = M._expanded_commits[commit.id]
+    if expanded == nil then
+      expanded = is_current
+    end
+    local arrow = expanded and (icons and "▾" or "-") or (icons and "▸" or "+")
+    local check = viewed == total and (icons and "✓" or "[V]") or (icons and "○" or "[ ]")
+    local hl = is_current and "CursorLine" or (viewed == total and "Comment" or nil)
+    local item = { is_commit = true, commit = commit }
+
+    -- Metadata first so it never clips; the subject wraps under itself (hanging indent)
+    local prefix = string.format("%s %s %s (%d/%d)%s%s ", arrow, check, commit.short, viewed, total,
+      commit.is_merge and " [merge]" or "", is_current and (icons and " ➤" or " >") or "")
+    local indent = vim.fn.strdisplaywidth(prefix)
+    local first_prefix = prefix
+    if width - indent < 20 then
+      -- Too narrow to wrap next to the metadata: put the subject on its own lines
+      add(vim.trim(prefix), hl)
+      file_map[#lines] = item
+      indent, first_prefix = 4, string.rep(" ", 4)
+    end
+    for i, part in ipairs(wrap_words(commit.subject, math.max(width - indent, 10))) do
+      add((i == 1 and first_prefix or string.rep(" ", indent)) .. part, hl)
+      file_map[#lines] = item
+    end
+
+    if expanded then
+      for _, f in ipairs(commit.files) do
+        local file_viewed = is_file_viewed(f.path, commit.id)
+        local is_current_file = is_current and f.path == current_file_path
+        local f_check = file_viewed and (icons and "✓" or "[V]") or (icons and "○" or "[ ]")
+        local hl = is_current_file and "Search" or (file_viewed and "Comment" or
+          (f.status == "A" and "DiffAdd" or (f.status == "D" and "DiffDelete" or "DiffChange")))
+        local f_idx = add(string.format("  %s %s %s %s", is_current_file and (icons and "➤" or ">") or " ", f_check,
+          f.status, f.path), hl)
+        file_map[f_idx] = { is_commit_file = true, commit = commit, path = f.path, status = f.status }
+      end
+    end
+  end
+
+  for _, file in ipairs(M._review_files) do
+    table.insert(M._review_files_ordered, file)
+  end
+
+  set_review_buffer_content(lines, highlights, file_map)
+end
+
 -- Render the review buffer
 local function render_review_buffer()
   if not M._review_buffer or not vim.api.nvim_buf_is_valid(M._review_buffer) then
+    return
+  end
+
+  if M._sidebar_view == "commits" then
+    render_commit_sidebar()
     return
   end
 
@@ -944,6 +1222,11 @@ local function render_review_buffer()
   table.insert(lines,
     string.format("Open: [<CR>] Current  [%s] Split  [%s] VSplit", cfg.open_split_key, cfg.open_vsplit_key))
   table.insert(lines, string.format("Sort: %s | Filter: %s", M._review_sort or cfg.sort_by, M._review_filter))
+  local commit, commit_idx = current_commit()
+  if commit then
+    table.insert(lines, string.format("Commit %d/%d: %s %s", commit_idx, #M._commits, commit.short, commit.subject))
+    table.insert(highlights, { line = #lines - 1, hl_group = "Title" })
+  end
   table.insert(lines, "")
 
   -- Filter files based on current filter
@@ -1154,7 +1437,7 @@ local function open_file_safe(file, split_cmd)
       -- Don't auto-mark as viewed - user should explicitly mark with mark_as_viewed_key
     else
       -- Open deleted file from merge_base (the PR's base commit, matching GitHub's view)
-      jj.file_lines_at_async(vim.g.pr_review_merge_base or "@-", file.path, function(data)
+      jj.file_lines_at_async(diff_base_rev() or "@-", file.path, function(data)
         if not data or #data == 0 then
           vim.notify("Could not load deleted file content", vim.log.levels.ERROR)
           return
@@ -1215,6 +1498,35 @@ local function open_file_from_review(split_type)
     M._collapsed_dirs[dir] = not M._collapsed_dirs[dir]
     render_review_buffer()
     return
+  end
+
+  -- Commit sidebar: a commit row enters that commit (or folds it if it is the current one)
+  local current = current_commit()
+  if item.is_commit then
+    if current and current.id == item.commit.id then
+      local expanded = M._expanded_commits[item.commit.id]
+      M._expanded_commits[item.commit.id] = expanded == false
+      render_review_buffer()
+    else
+      M._expanded_commits[item.commit.id] = true
+      M.goto_commit(item.commit.id)
+    end
+    return
+  end
+
+  -- Commit sidebar: a file row enters its commit first if needed
+  if item.is_commit_file then
+    if not current or current.id ~= item.commit.id then
+      M.goto_commit(item.commit.id, item.path)
+      return
+    end
+    local found = nil
+    for _, f in ipairs(M._review_files) do
+      if f.path == item.path then
+        found = f
+      end
+    end
+    item = found or { path = item.path, status = item.status }
   end
 
   -- It's a file
@@ -1299,15 +1611,27 @@ local function setup_review_buffer_keymaps(bufnr)
 
     local line = vim.api.nvim_win_get_cursor(0)[1]
     local file = file_map[line]
+    if not file or type(file) ~= "table" then return end
 
-    if file and type(file) == "table" and file.path then
+    if file.is_commit then
+      -- Toggle all files of the commit
+      local viewed, total = commit_progress(file.commit)
+      for _, f in ipairs(file.commit.files) do
+        set_file_viewed(f.path, viewed < total, file.commit.id)
+      end
+    elseif file.is_commit_file then
+      set_file_viewed(file.path, not is_file_viewed(file.path, file.commit.id), file.commit.id)
+    elseif file.path and not file.is_directory then
       file.viewed = true
-      M._viewed_files[file.path] = true
-      save_session()
-      render_review_buffer()
-      -- Move to next file
-      vim.cmd("normal! j")
+      set_file_viewed(file.path, true)
+    else
+      return
     end
+    save_session()
+    M.refresh_review_buffer()
+    update_changes_float()
+    -- Move to next line
+    vim.cmd("normal! j")
   end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Mark file as viewed" })
 
   -- Close buffer
@@ -1320,17 +1644,17 @@ local function setup_review_buffer_keymaps(bufnr)
 end
 
 -- Open or refresh review buffer
-function M.open_review_buffer(callback)
+function M.open_review_buffer(callback, files_loaded)
   if not vim.g.pr_review_number then
     vim.notify("Not in review mode", vim.log.levels.WARN)
     return
   end
 
-  -- Collect files if not already collected
-  if #M._review_files == 0 then
+  -- Collect files if not already collected (files_loaded: collected, possibly empty)
+  if #M._review_files == 0 and not files_loaded then
     collect_pr_files(function(files)
       M._review_files = files
-      M.open_review_buffer(callback) -- Recursive call after files are loaded
+      M.open_review_buffer(callback, true) -- Recursive call after files are loaded
     end)
     return
   end
@@ -1416,7 +1740,7 @@ function M.refresh_review_buffer()
   if M._review_buffer and vim.api.nvim_buf_is_valid(M._review_buffer) then
     -- Update viewed status in files list
     for _, file in ipairs(M._review_files) do
-      file.viewed = M._viewed_files[file.path] or false
+      file.viewed = is_file_viewed(file.path)
     end
     render_review_buffer()
   end
@@ -1458,6 +1782,26 @@ local function setup_global_review_keymaps()
       vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(M.config.prev_file_key, true, false, true), "n", false)
     end
   end, { desc = "Go to previous file (PR review mode)" })
+
+  -- Commit mode keymaps (global, but only work in review mode)
+  local commit_keys = {
+    { M.config.commit_mode_toggle_key, function() M.toggle_commit_mode() end, "Toggle PR / commit review mode" },
+    { M.config.next_commit_key, function() M.next_commit() end, "Go to next commit (PR review mode)" },
+    { M.config.prev_commit_key, function() M.prev_commit() end, "Go to previous commit (PR review mode)" },
+    { M.config.commit_sidebar_toggle_key, function() M.toggle_commit_sidebar() end, "Toggle files / commits sidebar" },
+  }
+  for _, k in ipairs(commit_keys) do
+    local key, fn, desc = k[1], k[2], k[3]
+    if key then
+      vim.keymap.set("n", key, function()
+        if vim.g.pr_review_number then
+          fn()
+        else
+          vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(key, true, false, true), "n", false)
+        end
+      end, { desc = desc })
+    end
+  end
 
   -- Toggle review buffer
   vim.keymap.set("n", M.config.review_buffer.toggle_key, function()
@@ -1520,7 +1864,7 @@ update_changes_float = function()
   local comments = M._buffer_comments[bufnr]
   local comment_count = comments and #comments or 0
   local stats = M._buffer_stats[bufnr]
-  local is_viewed = M._viewed_files[file_path] or false
+  local is_viewed = is_file_viewed(file_path)
 
   -- FLOAT 1: General info (file x/total)
   local general_lines = {}
@@ -1528,6 +1872,10 @@ update_changes_float = function()
     table.insert(general_lines, string.format(" 📁 File %d/%d ", file_idx, total_files))
   else
     table.insert(general_lines, string.format(" File %d/%d ", file_idx, total_files))
+  end
+  local commit, commit_idx = current_commit()
+  if commit then
+    table.insert(general_lines, string.format(" Commit %d/%d %s ", commit_idx, #M._commits, commit.short))
   end
 
   -- FLOAT 2: Buffer info (viewed, hunks, stats, comments)
@@ -1559,6 +1907,11 @@ update_changes_float = function()
   table.insert(keymap_lines, string.format(" %s: Mark viewed ", M.config.mark_as_viewed_key))
   table.insert(keymap_lines, string.format(" %s: Toggle split ", M.config.diff_view_toggle_key))
   table.insert(keymap_lines, string.format(" %s: Toggle floats ", M.config.toggle_floats_key))
+  table.insert(keymap_lines, string.format(" %s: %s ", M.config.commit_mode_toggle_key,
+    M._commit_mode and "Review whole PR" or "Review commits"))
+  table.insert(keymap_lines, string.format(" %s: Next commit ", M.config.next_commit_key))
+  table.insert(keymap_lines, string.format(" %s: Prev commit ", M.config.prev_commit_key))
+  table.insert(keymap_lines, string.format(" %s: Commits sidebar ", M.config.commit_sidebar_toggle_key))
 
   -- Helper to create/update float
   local function create_or_update_float(win_var, lines, row_offset, highlight)
@@ -1633,14 +1986,9 @@ function M.mark_file_as_viewed_and_next()
   local bufnr = vim.api.nvim_get_current_buf()
   local file_path = get_relative_path(bufnr)
 
-  -- Toggle viewed status
-  if M._viewed_files[file_path] then
-    -- If already viewed, unmark it
-    M._viewed_files[file_path] = false
-  else
-    -- If not viewed, mark as viewed and go to next file
-    M._viewed_files[file_path] = true
-  end
+  -- Toggle viewed status (only for this commit's changes in commit mode)
+  local now_viewed = not is_file_viewed(file_path)
+  set_file_viewed(file_path, now_viewed)
 
   -- Save session
   save_session()
@@ -1652,7 +2000,7 @@ function M.mark_file_as_viewed_and_next()
   M.refresh_review_buffer()
 
   -- Only go to next file if we just marked it as viewed (not when unmarking)
-  if M._viewed_files[file_path] then
+  if now_viewed then
     M.next_file()
   end
 end
@@ -1981,6 +2329,10 @@ local function load_changes_for_buffer(bufnr)
   end
 
   get_changed_lines_for_file(file_path, status, function(lines, hunks)
+    -- The buffer may be gone by the time the diff arrives (e.g. review cleanup)
+    if not vim.api.nvim_buf_is_valid(bufnr) or not vim.g.pr_review_number then
+      return
+    end
     if lines and #lines > 0 then
       M._buffer_changes[bufnr] = lines
       M._buffer_hunks[bufnr] = hunks
@@ -2415,6 +2767,25 @@ function M.load_comments_for_buffer(bufnr, force_reload)
 
   local file_path = get_relative_path(bufnr)
 
+  local function show(comments)
+    if comments and #comments > 0 then
+      M._buffer_comments[bufnr] = comments
+      -- Use defer_fn with a delay to ensure diff highlights are applied first
+      vim.defer_fn(function()
+        if vim.api.nvim_buf_is_valid(bufnr) then
+          display_comments(bufnr, comments)
+        end
+      end, 50)
+    else
+      M._buffer_comments[bufnr] = nil
+      vim.schedule(function()
+        if vim.api.nvim_buf_is_valid(bufnr) then
+          vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
+        end
+      end)
+    end
+  end
+
   -- Get regular comments
   github.get_comments_for_file(pr_number, file_path, function(comments, err)
     if err then
@@ -2424,6 +2795,19 @@ function M.load_comments_for_buffer(bufnr, force_reload)
     -- Initialize comments if nil
     if not comments then
       comments = {}
+    end
+
+    -- Commit mode: only comments made on this commit, at their line in this commit
+    local commit = current_commit()
+    if commit then
+      local commit_comments = {}
+      for _, c in ipairs(comments) do
+        if c.original_commit_id == commit.id then
+          table.insert(commit_comments, vim.tbl_extend("force", {}, c, { line = c.original_line or c.line }))
+        end
+      end
+      show(commit_comments)
+      return
     end
 
     -- Also get pending comments and merge them
@@ -2455,22 +2839,7 @@ function M.load_comments_for_buffer(bufnr, force_reload)
         table.insert(comments, lpc)
       end
 
-      if comments and #comments > 0 then
-        M._buffer_comments[bufnr] = comments
-        -- Use defer_fn with a delay to ensure diff highlights are applied first
-        vim.defer_fn(function()
-          if vim.api.nvim_buf_is_valid(bufnr) then
-            display_comments(bufnr, comments)
-          end
-        end, 50)
-      else
-        M._buffer_comments[bufnr] = nil
-        vim.schedule(function()
-          if vim.api.nvim_buf_is_valid(bufnr) then
-            vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
-          end
-        end)
-      end
+      show(comments)
     end)
   end)
 end
@@ -3534,6 +3903,11 @@ function M.add_review_comment_with_selection()
 end
 
 function M.add_pending_comment_with_selection()
+  if M._commit_mode then
+    vim.notify("Pending comments are only available when reviewing the whole PR (" ..
+      M.config.commit_mode_toggle_key .. "). Add a single comment instead.", vim.log.levels.WARN)
+    return
+  end
   if not M._visual_selection then
     vim.notify("No visual selection captured", vim.log.levels.WARN)
     return
@@ -3665,6 +4039,11 @@ function M.add_review_comment()
 end
 
 function M.add_pending_comment()
+  if M._commit_mode then
+    vim.notify("Pending comments are only available when reviewing the whole PR (" ..
+      M.config.commit_mode_toggle_key .. "). Add a single comment instead.", vim.log.levels.WARN)
+    return
+  end
   local pr_number = vim.g.pr_review_number
   if not pr_number then
     vim.notify("Not in review mode", vim.log.levels.WARN)
@@ -4552,6 +4931,7 @@ function M.load_last_session()
     main_root = session_data.main_root,
     workspace = session_data.workspace,
     merge_base = session_data.merge_base,
+    head = session_data.head,
     review_change = session_data.review_change,
   })
   if session_data.mode == "workspace" and vim.fn.getcwd() ~= root then
@@ -4559,19 +4939,30 @@ function M.load_last_session()
   end
   vim.g.pr_review_modified_files = session_data.modified_files
   M._viewed_files = session_data.viewed_files or {}
+  M._viewed_commit_files = session_data.viewed_commit_files or {}
+  M._commit_mode = session_data.commit_mode or false
+  M._current_commit = session_data.current_commit
+  github.comment_commit_id = M._commit_mode and M._current_commit or nil
   M._local_pending_comments = session_data.pending_comments or {}
   M._drafts = session_data.drafts or {}
 
   -- Start polling for remote updates
   start_update_polling()
 
-  -- Open review buffer and first file
-  M.open_review_buffer(function()
-    -- Use the ordered list (same order as ReviewBuffer)
-    local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
-    if first_file then
-      open_file_safe(first_file, nil)
+  -- Open review buffer and first file (the commit list decides the files in commit mode)
+  M._commits = nil
+  load_commits(function()
+    if M._commit_mode and not current_commit() then
+      vim.notify("The reviewed commit is no longer part of the PR, use " .. M.config.commit_mode_toggle_key ..
+        " to go back to the whole PR", vim.log.levels.WARN)
     end
+    M.open_review_buffer(function()
+      -- Use the ordered list (same order as ReviewBuffer)
+      local first_file = #M._review_files_ordered > 0 and M._review_files_ordered[1] or M._review_files[1]
+      if first_file then
+        open_file_safe(first_file, nil)
+      end
+    end)
   end)
 
   vim.notify("✅ Session restored for PR #" .. session_data.pr_number, vim.log.levels.INFO)
@@ -4986,6 +5377,11 @@ function M._do_start_review(pr)
     if mode == "workspace" then
       open_review_tab(state.root)
     end
+    M._commits = nil
+    M._commit_mode = false
+    M._current_commit = nil
+    github.comment_commit_id = nil
+    load_commits()
 
     -- Start polling for remote updates
     start_update_polling()
@@ -5345,6 +5741,291 @@ function M.review_pr()
   end)
 end
 
+-- ===== Commit mode: review the PR one commit at a time =====
+
+-- Load the PR's commits (needed for commit mode and per-commit viewed state)
+load_commits = function(callback)
+  if not vim.g.pr_review_merge_base then
+    if callback then callback() end
+    return
+  end
+  if not vim.g.pr_review_head and not M._commit_mode then
+    -- Sessions from before commit mode: in PR mode the review change sits on the PR head
+    local change = jj.current_change()
+    vim.g.pr_review_head = change and change.parents[1]
+  end
+
+  jj.pr_commits(vim.g.pr_review_merge_base, vim.g.pr_review_head or "@-", function(commits)
+    local first_load = vim.tbl_isempty(M._viewed_commit_files)
+    M._commits = commits
+
+    -- Files marked viewed before per-commit tracking existed count as viewed in all their commits
+    if first_load then
+      for path, viewed in pairs(M._viewed_files) do
+        if viewed then
+          for _, commit in ipairs(commits) do
+            if commit_touches(commit, path) then
+              M._viewed_commit_files[commit.id] = M._viewed_commit_files[commit.id] or {}
+              M._viewed_commit_files[commit.id][path] = true
+            end
+          end
+        end
+      end
+    end
+
+    local seen = {}
+    for _, commit in ipairs(commits) do
+      for _, f in ipairs(commit.files) do
+        if not seen[f.path] then
+          seen[f.path] = true
+          sync_pr_viewed(f.path)
+        end
+      end
+    end
+
+    save_session()
+    if callback then callback() end
+  end)
+end
+
+-- Re-read the review files after the working copy moved (commit switch / back to the PR head)
+-- and open target_path if it is part of the new file list
+local function reload_review_view(target_path)
+  if M._diff_view_mode == "split" then
+    restore_unified_view()
+  end
+  M._diff_view_mode = "unified"
+  M._buffer_changes = {}
+  M._buffer_hunks = {}
+  M._buffer_comments = {}
+  M._buffer_stats = {}
+  M._buffer_jumped = {}
+
+  local root = review_root()
+  local stale = {}
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+      local name = vim.api.nvim_buf_get_name(buf)
+      if name:match(" %[DELETED%]$") then
+        -- Deleted-file buffers show content from the old diff base
+        table.insert(stale, buf)
+      elseif name:sub(1, #root + 1) == root .. "/" and vim.bo[buf].buftype == "" then
+        for _, ns in ipairs({ ns_id, changes_ns_id, diff_ns_id, hunk_hints_ns_id }) do
+          vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+        end
+        if vim.fn.filereadable(name) == 1 then
+          vim.api.nvim_buf_call(buf, function()
+            vim.cmd("silent! edit!")
+          end)
+        else
+          -- The file doesn't exist in this revision
+          table.insert(stale, buf)
+        end
+      end
+    end
+  end
+
+  M._review_files = {}
+  M._review_files_ordered = {}
+  M.open_review_buffer(function()
+    local file_list = #M._review_files_ordered > 0 and M._review_files_ordered or M._review_files
+    local target = nil
+    for _, f in ipairs(file_list) do
+      if f.path == target_path then
+        target = f
+      end
+    end
+    target = target or file_list[1]
+
+    if target then
+      open_file_safe(target, nil)
+      -- BufEnter doesn't fire when the target was already the current buffer
+      local buf = vim.api.nvim_get_current_buf()
+      if target.status ~= "D" then
+        M.load_comments_for_buffer(buf)
+        load_changes_for_buffer(buf)
+        load_inline_diff_for_buffer(buf)
+      end
+    end
+
+    for _, buf in ipairs(stale) do
+      if vim.api.nvim_buf_is_valid(buf) and #vim.fn.win_findbuf(buf) == 0 then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end
+    end
+    M.refresh_review_buffer()
+    update_changes_float()
+  end)
+end
+
+-- Review a single commit of the PR. target_path: file to open if the commit changes it
+function M.goto_commit(commit_id, target_path)
+  if not vim.g.pr_review_number then
+    vim.notify("Not in review mode", vim.log.levels.WARN)
+    return
+  end
+  if not M._commits then
+    vim.notify("Loading PR commits...", vim.log.levels.INFO)
+    load_commits(function()
+      if M._commits and #M._commits > 0 then
+        M.goto_commit(commit_id, target_path)
+      end
+    end)
+    return
+  end
+  if M._switching_commit then
+    return
+  end
+
+  local commit, idx = nil, nil
+  for i, c in ipairs(M._commits) do
+    if c.id == commit_id then
+      commit, idx = c, i
+    end
+  end
+  if not commit then
+    vim.notify("Commit is not part of this PR: " .. tostring(commit_id), vim.log.levels.ERROR)
+    return
+  end
+
+  target_path = target_path or get_relative_path(vim.api.nvim_get_current_buf())
+  local description = string.format("%s%d: commit %s %s", jj.review_description_prefix, vim.g.pr_review_number,
+    commit.short, commit.subject)
+
+  M._switching_commit = true
+  jj.move_review_change(commit.id, description, function(ok, err, change_id)
+    M._switching_commit = false
+    if not ok then
+      vim.notify("Failed to switch to commit " .. commit.short .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
+      return
+    end
+    vim.g.pr_review_change = change_id
+    M._commit_mode = true
+    M._current_commit = commit.id
+    github.comment_commit_id = commit.id
+    save_session()
+    reload_review_view(target_path)
+    vim.notify(string.format("Commit %d/%d: %s %s", idx, #M._commits, commit.short, commit.subject),
+      vim.log.levels.INFO)
+  end)
+end
+
+-- Back to reviewing the whole PR
+function M.exit_commit_mode()
+  if not M._commit_mode or M._switching_commit then
+    return
+  end
+  local target_path = get_relative_path(vim.api.nvim_get_current_buf())
+  local description = string.format("%s%d: PR head -> %s", jj.review_description_prefix, vim.g.pr_review_number,
+    vim.g.pr_review_base_branch or "base")
+
+  M._switching_commit = true
+  jj.move_review_change(vim.g.pr_review_head or "@-", description, function(ok, err, change_id)
+    M._switching_commit = false
+    if not ok then
+      vim.notify("Failed to go back to the PR head: " .. (err or "unknown"), vim.log.levels.ERROR)
+      return
+    end
+    vim.g.pr_review_change = change_id
+    M._commit_mode = false
+    github.comment_commit_id = nil
+    save_session()
+    reload_review_view(target_path)
+    vim.notify("Reviewing the whole PR", vim.log.levels.INFO)
+  end)
+end
+
+-- Commit to start commit mode on: the last one reviewed, else the first with unviewed files
+local function commit_to_enter()
+  for _, commit in ipairs(M._commits) do
+    if commit.id == M._current_commit then
+      return commit
+    end
+  end
+  for _, commit in ipairs(M._commits) do
+    local viewed, total = commit_progress(commit)
+    if viewed < total then
+      return commit
+    end
+  end
+  return M._commits[1]
+end
+
+function M.toggle_commit_mode()
+  if not vim.g.pr_review_number then
+    return
+  end
+  if M._commit_mode then
+    M.exit_commit_mode()
+    return
+  end
+  if not M._commits then
+    load_commits(M.toggle_commit_mode)
+    return
+  end
+  local commit = commit_to_enter()
+  if not commit then
+    vim.notify("This PR has no commits to review", vim.log.levels.WARN)
+    return
+  end
+  M.goto_commit(commit.id)
+end
+
+local function step_commit(delta)
+  if not vim.g.pr_review_number then
+    return
+  end
+  if not M._commits then
+    load_commits(function()
+      step_commit(delta)
+    end)
+    return
+  end
+  if #M._commits == 0 then
+    vim.notify("This PR has no commits to review", vim.log.levels.WARN)
+    return
+  end
+  local _, idx = current_commit()
+  if not idx then
+    -- From PR mode: next starts at the first commit, previous at the last one
+    idx = delta > 0 and 1 or #M._commits
+  else
+    idx = idx + delta
+  end
+  if idx < 1 then
+    vim.notify("Already at the first commit", vim.log.levels.INFO)
+    return
+  elseif idx > #M._commits then
+    vim.notify("Already at the last commit", vim.log.levels.INFO)
+    return
+  end
+  M.goto_commit(M._commits[idx].id)
+end
+
+function M.next_commit()
+  step_commit(1)
+end
+
+function M.prev_commit()
+  step_commit(-1)
+end
+
+-- Switch the sidebar between the file list and the commit tree
+function M.toggle_commit_sidebar()
+  if not vim.g.pr_review_number then
+    return
+  end
+  M._sidebar_view = M._sidebar_view == "commits" and "files" or "commits"
+  if not M._commits then
+    load_commits(M.refresh_review_buffer)
+  end
+  if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
+    M.refresh_review_buffer()
+  else
+    M.open_review_buffer()
+  end
+end
+
 -- Refresh the PR branch with latest changes
 function M.refresh_pr_branch()
   local pr_number = vim.g.pr_review_number
@@ -5414,6 +6095,11 @@ function M.refresh_pr_branch()
           end
           state.mode = mode
           set_review_location(state)
+          -- The PR head moved: back to PR mode with a fresh commit list
+          M._commits = nil
+          M._commit_mode = false
+          github.comment_commit_id = nil
+          load_commits(M.refresh_review_buffer)
 
           -- Clear all cached data
           M._buffer_changes = {}
@@ -5510,6 +6196,13 @@ function M.cleanup_review_branch()
       M._buffer_hunks = {}
       M._buffer_stats = {}
       M._viewed_files = {}
+      M._viewed_commit_files = {}
+      M._commits = nil
+      M._commit_mode = false
+      M._current_commit = nil
+      M._sidebar_view = "files"
+      M._expanded_commits = {}
+      github.comment_commit_id = nil
       M._buffer_jumped = {}
       M._buffer_keymaps_saved = {}
       M._review_files = {}

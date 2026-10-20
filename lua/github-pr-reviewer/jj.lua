@@ -189,7 +189,7 @@ end
 -- Fetch the PR, create a review change on top of its head and compute the merge-base.
 -- pr: { number, head_branch, base_branch, head_repo_owner?, head_repo_url? }
 -- opts: { mode = "workspace"|"inplace", path? } (path: where to create the review workspace)
--- callback(ok, err, { merge_base, review_change, root, main_root, workspace? })
+-- callback(ok, err, { merge_base, head, review_change, root, main_root, workspace? })
 -- inplace: if replace_change is given (refresh), that review change is abandoned afterwards.
 -- workspace: an existing pr-<number> workspace is reused and its previous change abandoned.
 function M.checkout_pr(pr, replace_change, opts, callback)
@@ -249,6 +249,7 @@ function M.checkout_pr(pr, replace_change, opts, callback)
           local change = M.current_change(root)
           callback(true, nil, {
             merge_base = merge_base or base,
+            head = head,
             review_change = change and change.change_id,
             root = root,
             main_root = main_root,
@@ -273,6 +274,7 @@ function M.checkout_pr(pr, replace_change, opts, callback)
       local change = M.current_change(root)
       callback(true, nil, {
         merge_base = merge_base or base,
+        head = head,
         review_change = change and change.change_id,
         root = root,
         main_root = main_root,
@@ -282,29 +284,103 @@ function M.checkout_pr(pr, replace_change, opts, callback)
   end)
 end
 
+local diff_entry_template = 'self.status() ++ "\\t" ++ self.source().path() ++ "\\t" ++ self.target().path() ++ "\\n"'
+
+-- Parse `jj diff -T diff_entry_template` output into { { path, status = "A"|"M"|"D" } }
+local function parse_diff_entries(out)
+  local files = {}
+  for line in out:gmatch("[^\n]+") do
+    local status, source, target = line:match("^(%S+)\t([^\t]*)\t(.*)$")
+    if status == "added" or status == "copied" then
+      table.insert(files, { path = target, status = "A" })
+    elseif status == "removed" then
+      table.insert(files, { path = source, status = "D" })
+    elseif status == "renamed" then
+      table.insert(files, { path = source, status = "D" })
+      table.insert(files, { path = target, status = "A" })
+    elseif status then
+      table.insert(files, { path = target, status = "M" })
+    end
+  end
+  return files
+end
+
 -- List files changed between the merge-base and the working copy.
 -- callback(files) with files = { { path, status = "A"|"M"|"D" } }
 function M.changed_files(merge_base, callback)
-  local template = 'self.status() ++ "\\t" ++ self.source().path() ++ "\\t" ++ self.target().path() ++ "\\n"'
-  run_async({ "diff", "--from", merge_base or "trunk()", "--to", "@", "-T", template }, function(ok, out)
-    local files = {}
+  run_async({ "diff", "--from", merge_base or "trunk()", "--to", "@", "-T", diff_entry_template }, function(ok, out)
+    local files = ok and parse_diff_entries(out) or {}
+    debug_log(string.format("Debug: Found %d changed files", #files))
+    callback(files)
+  end)
+end
+
+-- The PR's commits, oldest first, each with the files it changes.
+-- Merge commits are diffed against their auto-merged parents (as `jj diff -r` does),
+-- so they only show conflict resolutions.
+-- callback(commits) with commits = { { id, short, subject, parent, is_merge, files } }
+function M.pr_commits(merge_base, head, callback)
+  local template = 'commit_id ++ "\\t" ++ commit_id.short(8) ++ "\\t" ++ parents.map(|c| c.commit_id()).join(" ")'
+    .. ' ++ "\\t" ++ description.first_line() ++ "\\n"'
+  local revset = string.format("%s..%s", merge_base, head)
+  run_async({ "log", "--ignore-working-copy", "--no-graph", "--reversed", "-r", revset, "-T", template }, function(ok, out)
+    local commits = {}
     if ok then
       for line in out:gmatch("[^\n]+") do
-        local status, source, target = line:match("^(%S+)\t([^\t]*)\t(.*)$")
-        if status == "added" or status == "copied" then
-          table.insert(files, { path = target, status = "A" })
-        elseif status == "removed" then
-          table.insert(files, { path = source, status = "D" })
-        elseif status == "renamed" then
-          table.insert(files, { path = source, status = "D" })
-          table.insert(files, { path = target, status = "A" })
-        elseif status then
-          table.insert(files, { path = target, status = "M" })
+        local id, short, parents, subject = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+        if id then
+          local parent_list = vim.split(parents, " ", { trimempty = true })
+          table.insert(commits, {
+            id = id,
+            short = short,
+            subject = subject ~= "" and subject or "(no description)",
+            parent = parent_list[1],
+            is_merge = #parent_list > 1,
+            files = {},
+          })
         end
       end
     end
-    debug_log(string.format("Debug: Found %d changed files", #files))
-    callback(files)
+
+    local pending = #commits
+    if pending == 0 then
+      callback(commits)
+      return
+    end
+    for _, commit in ipairs(commits) do
+      run_async({ "diff", "--ignore-working-copy", "-r", commit.id, "-T", diff_entry_template }, function(diff_ok, diff_out)
+        commit.files = diff_ok and parse_diff_entries(diff_out) or {}
+        pending = pending - 1
+        if pending == 0 then
+          callback(commits)
+        end
+      end)
+    end
+  end)
+end
+
+-- Zero-context unified diff of a file in a single commit (against its parents). callback(lines)
+function M.diff_commit_file(commit, path, callback)
+  run_async({ "diff", "--ignore-working-copy", "--git", "--context", "0", "-r", commit, fileset(path) }, function(ok, out)
+    callback(ok and vim.split(out, "\n", { plain = true, trimempty = true }) or {})
+  end)
+end
+
+-- Replace the review change in the review root with a new one on top of rev.
+-- The previous review change is abandoned. callback(ok, err, new_change_id)
+function M.move_review_change(rev, description, callback)
+  local previous = M.current_review_pr() and M.current_change()
+  local commands = { { "new", rev, "-m", description } }
+  if previous then
+    table.insert(commands, { "abandon", previous.change_id })
+  end
+  run_sequence(commands, function(ok, err)
+    if not ok then
+      callback(false, err)
+      return
+    end
+    local change = M.current_change()
+    callback(true, nil, change and change.change_id)
   end)
 end
 

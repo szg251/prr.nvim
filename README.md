@@ -155,6 +155,12 @@ require("github-pr-reviewer").setup({
   -- Key to toggle floating windows visibility (only works in review mode)
   toggle_floats_key = "<C-r>",
 
+  -- Commit-based reviewing (only works in review mode)
+  commit_mode_toggle_key = "<C-t>",    -- toggle between the whole PR and single commits
+  next_commit_key = "<C-n>",           -- next commit (enters commit mode)
+  prev_commit_key = "<C-p>",           -- previous commit (enters commit mode)
+  commit_sidebar_toggle_key = "<C-b>", -- switch the sidebar between files and commits
+
   -- Key to jump to next hunk (only works in review mode)
   next_hunk_key = "<C-j>",
 
@@ -365,6 +371,34 @@ The plugin includes built-in navigation that only works during PR review mode:
 - `<CR>` (default) - Mark file as viewed and jump to next file
 
 All keybindings are configurable in setup and only activate during PR review mode.
+
+### Commit-Based Reviewing
+
+Instead of the whole PR at once, you can review it one commit at a time:
+
+- `<C-t>` (default) - Toggle between reviewing the whole PR and single commits
+- `<C-n>` / `<C-p>` (default) - Next / previous commit (from PR mode they start at the first / last commit)
+- `<C-b>` (default) - Switch the sidebar between the file list and the commit tree
+
+In commit mode the review change is moved on top of that commit (`jj new <commit>`), so the files on disk
+are exactly the commit's version and LSP, split view and inline diff work as usual. The diff is the
+commit's own change against its parent; merge commits are diffed against their auto-merged parents, so
+they only show conflict resolutions. The file list, file navigation and floats show the current commit.
+
+The commit sidebar shows the PR's commits (oldest first) with viewed progress; the current commit is
+expanded to its files. `<CR>` on a commit enters it (on the current one: fold/unfold), `<CR>` on a file
+enters its commit and opens it, `m` toggles viewed for a file or for a whole commit.
+
+**Viewed state is per commit.** Marking a file viewed in commit mode only covers that commit's changes to
+it. The file counts as viewed for the whole PR once it is viewed in every commit that changes it.
+Marking a file viewed in PR mode marks it in all of its commits. Viewed state is stored per commit SHA, so
+after a force-push the rewritten commits start unviewed; new commits on top only reset the files they touch.
+
+**Comments in commit mode** show only the comments made on that commit, at their line in that commit.
+New single comments are attached to that commit; pending (batched) comments are only available in PR mode,
+because a GitHub review is submitted against a single commit.
+
+Unsaved edits in review buffers are discarded when switching commits.
 
 ### Split Diff View
 
