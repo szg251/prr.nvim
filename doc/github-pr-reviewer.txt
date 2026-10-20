@@ -209,7 +209,8 @@ REVIEW ACTIONS~
 :PRApprove              Approve the PR with an optional comment. If you
                         have pending comments, they will be shown for
                         confirmation and submitted together with your
-                        approval.
+                        approval. Afterwards you are asked whether to exit
+                        the review; yes runs |:PRReviewCleanup|.
 
                                                      *:PRRequestChanges*
 :PRRequestChanges       Request changes on the PR with a required reason.

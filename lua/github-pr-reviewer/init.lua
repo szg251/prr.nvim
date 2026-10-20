@@ -2580,6 +2580,17 @@ local function show_pending_comments_preview(pending_comments, callback)
   vim.keymap.set("n", "<Esc>", function() close_and_respond(false) end, { buffer = buf, nowait = true })
 end
 
+-- After approving, the review is usually done: offer to exit and clean it up
+local function offer_exit_after_approve(pr_number)
+  vim.schedule(function()
+    local choice = vim.fn.confirm(string.format("PR #%d approved. Exit the review and clean it up?", pr_number),
+      "&Yes\n&No", 1)
+    if choice == 1 then
+      M.cleanup_review_branch({ confirmed = true })
+    end
+  end)
+end
+
 function M.approve_pr()
   local pr_number = vim.g.pr_review_number
   if not pr_number then
@@ -2617,6 +2628,7 @@ function M.approve_pr()
 
             vim.notify(string.format("✅ PR #%d approved with %d comments!", pr_number, #pending_comments),
               vim.log.levels.INFO)
+            offer_exit_after_approve(pr_number)
           else
             vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
@@ -2626,6 +2638,7 @@ function M.approve_pr()
         github.approve_pr(pr_number, body, function(ok, err)
           if ok then
             vim.notify("✅ PR #" .. pr_number .. " approved!", vim.log.levels.INFO)
+            offer_exit_after_approve(pr_number)
           else
             vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
@@ -5680,7 +5693,9 @@ local function detect_review_location(pr_number)
   return { mode = "inplace", root = root, main_root = workspaces.default or root }
 end
 
-function M.cleanup_review_branch()
+-- opts.confirmed: the user already agreed to exit (skip the confirmation prompt)
+function M.cleanup_review_branch(opts)
+  opts = opts or {}
   local pr_number = jj.current_review_pr()
   if not pr_number then
     vim.notify("Not on a review change", vim.log.levels.WARN)
@@ -5699,9 +5714,11 @@ function M.cleanup_review_branch()
   end
 
   -- Confirm before exiting review
-  local choice = vim.fn.confirm("Exit review and abandon the review change?", "&Yes\n&No", 2)
-  if choice ~= 1 then
-    return
+  if not opts.confirmed then
+    local choice = vim.fn.confirm("Exit review and abandon the review change?", "&Yes\n&No", 2)
+    if choice ~= 1 then
+      return
+    end
   end
 
   local current = jj.current_change()

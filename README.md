@@ -518,6 +518,7 @@ Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
 1. Run `:PRApprove` to approve, or `:PRRequestChanges` to request changes
    - If you have pending comments, they'll be shown for confirmation
    - All pending comments are submitted with your review
+   - After approving, you're asked whether to exit the review; yes runs the cleanup below
 2. Run `:PRReviewCleanup` to:
    - **Workspace mode**: wipe the workspace's buffers, `:cd` back to where you came from and run `jj workspace remove pr-<N>` (deletes the directory and its git worktree)
    - **Inplace mode**: return to the change you were on before the review
