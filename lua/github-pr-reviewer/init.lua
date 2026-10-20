@@ -5677,14 +5677,17 @@ function M.show_review_menu()
     -- Not in review mode - show PR selection options
     local items = {}
 
-    -- If has session, make Load the primary option (l key)
+    local review_requests = { key = "r", desc = "List Review Requests", cmd = function() M.list_review_requests() end }
+
+    -- If has session, make Load the primary option (l key); review requests always come second
     if has_session then
       table.insert(items, { key = "l", desc = "Load Last Session",              cmd = function() M.load_last_session() end })
+      table.insert(items, review_requests)
       table.insert(items, { key = "p", desc = "List Pull Requests",             cmd = function() M.review_pr() end })
     else
       table.insert(items, { key = "l", desc = "List Pull Requests",             cmd = function() M.review_pr() end })
+      table.insert(items, review_requests)
     end
-    table.insert(items, { key = "r", desc = "List Pull Requests with Assignee", cmd = function() M.list_review_requests() end })
 
     sections = {
       {

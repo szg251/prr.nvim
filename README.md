@@ -216,8 +216,8 @@ require("github-pr-reviewer").setup({
 ```
 
 From the menu, press:
-- `r` - Start reviewing a PR (list all open PRs)
-- `l` - List PRs where you're requested as reviewer
+- `l` - Start reviewing a PR (list all open PRs; when a saved session exists, `l` loads it and `p` lists PRs)
+- `r` - List PRs where you're requested as reviewer
 - `b` - Toggle review buffer (see all changed files)
 - `i` - Show PR info (stats, reviews, CI checks)
 - `o` - Open PR in browser
