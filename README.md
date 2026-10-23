@@ -377,7 +377,7 @@ merge-base and the PR head. Merge commits are listed against their auto-merged p
 only shows conflict resolutions, while git's `HEAD` is the first parent, so git tools show the merge
 against its first parent. The file list, file navigation and floats show the current commit.
 
-In commit mode the sidebar shows the PR's commits (oldest first) with viewed progress; the current commit is
+In commit mode the sidebar shows the PR's commits (oldest first), identified by their jj change id (unique prefix highlighted like `jj log`, `PRReviewChangeIdPrefix` / `PRReviewChangeIdRest`), with viewed progress; the current commit is
 expanded to its files. `<CR>` on a commit enters it (on the current one: fold/unfold), `<CR>` on a file
 enters its commit and opens it, `m` toggles viewed for a file or for a whole commit.
 

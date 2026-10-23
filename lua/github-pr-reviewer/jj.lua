@@ -346,21 +346,27 @@ end
 -- The PR's commits, oldest first, each with the files it changes.
 -- Merge commits are diffed against their auto-merged parents (as `jj diff -r` does),
 -- so they only show conflict resolutions.
--- callback(commits) with commits = { { id, short, subject, parent, parents, is_merge, files } }
+-- callback(commits) with commits = { { id, short, change, change_prefix, subject, parent, parents, is_merge,
+-- files } }: id/short are the commit id, change is the jj change id in its shortest unique form (at
+-- least 8 characters), change_prefix its unique prefix (highlighted like `jj log` does)
 function M.pr_commits(merge_base, head, callback)
-  local template = 'commit_id ++ "\\t" ++ commit_id.short(8) ++ "\\t" ++ parents.map(|c| c.commit_id()).join(" ")'
+  local template = 'commit_id ++ "\\t" ++ commit_id.short(8) ++ "\\t" ++ change_id.shortest(8).prefix() ++ "\\t"'
+    .. ' ++ change_id.shortest(8).rest() ++ "\\t" ++ parents.map(|c| c.commit_id()).join(" ")'
     .. ' ++ "\\t" ++ description.first_line() ++ "\\n"'
   local revset = string.format("%s..%s", merge_base, head)
   run_async({ "log", "--ignore-working-copy", "--no-graph", "--reversed", "-r", revset, "-T", template }, function(ok, out)
     local commits = {}
     if ok then
       for line in out:gmatch("[^\n]+") do
-        local id, short, parents, subject = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
+        local id, short, change_prefix, change_rest, parents, subject =
+          line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
         if id then
           local parent_list = vim.split(parents, " ", { trimempty = true })
           table.insert(commits, {
             id = id,
             short = short,
+            change = change_prefix .. change_rest,
+            change_prefix = change_prefix,
             subject = subject ~= "" and subject or "(no description)",
             parent = parent_list[1],
             parents = parent_list,

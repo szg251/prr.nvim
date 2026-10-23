@@ -913,10 +913,12 @@ local function render_commit_sidebar()
     local item = { is_commit = true, commit = commit }
 
     -- Metadata first so it never clips; the subject wraps under itself (hanging indent)
-    local prefix = string.format("%s %s %s (%d/%d)%s%s ", arrow, check, commit.short, viewed, total,
+    local lead = arrow .. " " .. check .. " "
+    local prefix = string.format("%s%s (%d/%d)%s%s ", lead, commit.change, viewed, total,
       commit.is_merge and " [merge]" or "", is_current and (icons and " ➤" or " >") or "")
     local indent = vim.fn.strdisplaywidth(prefix)
     local first_prefix = prefix
+    local first_line = #lines + 1
     if width - indent < 20 then
       -- Too narrow to wrap next to the metadata: put the subject on its own lines
       add(vim.trim(prefix), hl)
@@ -927,6 +929,11 @@ local function render_commit_sidebar()
       add((i == 1 and first_prefix or string.rep(" ", indent)) .. part, hl)
       file_map[#lines] = item
     end
+    -- jj change id: unique prefix highlighted, the rest dimmed (like `jj log`)
+    table.insert(highlights, { line = first_line - 1, hl_group = "PRReviewChangeIdPrefix",
+      start_col = #lead, end_col = #lead + #commit.change_prefix })
+    table.insert(highlights, { line = first_line - 1, hl_group = "PRReviewChangeIdRest",
+      start_col = #lead + #commit.change_prefix, end_col = #lead + #commit.change })
 
     if expanded then
       for _, f in ipairs(commit.files) do
@@ -1640,7 +1647,7 @@ update_changes_float = function()
   end
   local commit, commit_idx = current_commit()
   if commit then
-    table.insert(general_lines, string.format(" Commit %d/%d %s ", commit_idx, #M._commits, commit.short))
+    table.insert(general_lines, string.format(" Commit %d/%d %s ", commit_idx, #M._commits, commit.change))
   end
 
   -- FLOAT 2: Buffer info (viewed, hunks, stats, comments)
@@ -4951,6 +4958,9 @@ end
 local function define_highlights()
   vim.api.nvim_set_hl(0, "PRReviewSelection", { link = "CursorLine", default = true }) -- sidebar entry under the cursor
   vim.api.nvim_set_hl(0, "PRReviewCurrent", { bold = true, default = true })          -- open file / reviewed commit
+  -- jj change ids in the commit sidebar: unique prefix and the rest (jj log colors)
+  vim.api.nvim_set_hl(0, "PRReviewChangeIdPrefix", { fg = "magenta", bold = true, ctermfg = "magenta", default = true })
+  vim.api.nvim_set_hl(0, "PRReviewChangeIdRest", { link = "Comment", default = true })
 end
 
 function M.setup(opts)
@@ -5388,13 +5398,13 @@ function M.goto_commit(commit_id, target_path)
 
   target_path = target_path or get_relative_path(vim.api.nvim_get_current_buf())
   local description = string.format("%s%d: commit %s %s", jj.review_description_prefix, vim.g.pr_review_number,
-    commit.short, commit.subject)
+    commit.change, commit.subject)
 
   M._switching_commit = true
   jj.move_review_change(commit.parents, commit.id, description, function(ok, err, change_id)
     M._switching_commit = false
     if not ok then
-      vim.notify("Failed to switch to commit " .. commit.short .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
+      vim.notify("Failed to switch to commit " .. commit.change .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
       return
     end
     vim.g.pr_review_change = change_id
@@ -5403,7 +5413,7 @@ function M.goto_commit(commit_id, target_path)
     github.comment_commit_id = commit.id
     save_session()
     reload_review_view(target_path)
-    vim.notify(string.format("Commit %d/%d: %s %s", idx, #M._commits, commit.short, commit.subject),
+    vim.notify(string.format("Commit %d/%d: %s %s", idx, #M._commits, commit.change, commit.subject),
       vim.log.levels.INFO)
   end)
 end

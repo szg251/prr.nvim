@@ -252,6 +252,8 @@ Defined in setup by `define_highlights()` (with `default = true`, re-applied on 
 ```lua
 - PRReviewSelection (links to CursorLine) -- sidebar entry under the cursor, all lines of a wrapped entry (update_sidebar_selection)
 - PRReviewCurrent (bold)                  -- open file / reviewed commit in the sidebar
+- PRReviewChangeIdPrefix (bold magenta)   -- unique prefix of a jj change id in the commit sidebar
+- PRReviewChangeIdRest (links to Comment) -- rest of the change id
 ```
 
 ## Debugging Tips
