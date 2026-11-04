@@ -182,9 +182,10 @@ function M.workspaces()
 end
 
 -- Open reviews: workspaces whose working copy is a review change ("pr-review #<N>: ...").
--- Returns { { pr, name, root, subject } }, subject being the description after the prefix
+-- Returns { { pr, name, root, change_id, subject } }, subject being the description after the prefix
 function M.review_workspaces()
-  local template = 'name ++ "\\t" ++ root ++ "\\t" ++ target.description().first_line() ++ "\\n"'
+  local template = 'name ++ "\\t" ++ root ++ "\\t" ++ target.change_id() ++ "\\t" ++ '
+    .. 'target.description().first_line() ++ "\\n"'
   local ok, out = run({ "workspace", "list", "--ignore-working-copy", "-T", template })
   local reviews = {}
   if not ok then
@@ -192,18 +193,37 @@ function M.review_workspaces()
   end
   local prefix = vim.pesc(M.review_description_prefix)
   for line in out:gmatch("[^\n]+") do
-    local name, root, description = line:match("^([^\t]*)\t([^\t]*)\t(.*)$")
+    local name, root, change_id, description = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
     local pr, subject = (description or ""):match("^" .. prefix .. "(%d+):?%s*(.*)$")
     if pr then
-      table.insert(reviews, { pr = tonumber(pr), name = name, root = root, subject = subject })
+      table.insert(reviews, { pr = tonumber(pr), name = name, root = root, change_id = change_id, subject = subject })
     end
   end
   return reviews
 end
 
--- Default location of a review workspace: <repo-root>/../<repo-name>-pr-<number>
+-- GitHub repository name (without owner) of the origin remote, e.g. "repo" for
+-- git@github.com:owner/repo.git or https://github.com/owner/repo
+function M.origin_repo_name(repo_root)
+  local ok, out = run({ "git", "remote", "list" }, repo_root)
+  if not ok then
+    return nil
+  end
+  for line in out:gmatch("[^\n]+") do
+    local name, url = line:match("^(%S+)%s+(%S+)")
+    if name == "origin" then
+      local repo = url:gsub("/+$", ""):gsub("%.git$", ""):match("([^/:]+)$")
+      return repo ~= "" and repo or nil
+    end
+  end
+  return nil
+end
+
+-- Default location of a review workspace: ~/.prr/<github-repo-name>-pr-<number>
+-- (the repo directory's name when origin isn't recognized)
 function M.default_workspace_path(repo_root, pr_number)
-  return string.format("%s/%s-pr-%d", vim.fn.fnamemodify(repo_root, ":h"), vim.fn.fnamemodify(repo_root, ":t"), pr_number)
+  local name = M.origin_repo_name(repo_root) or vim.fn.fnamemodify(repo_root, ":t")
+  return string.format("%s/%s-pr-%d", vim.fn.expand("~/.prr"), name, pr_number)
 end
 
 -- Fetch the PR, create a review change on top of its head and compute the merge-base.
@@ -263,6 +283,7 @@ function M.checkout_pr(pr, replace_change, opts, callback)
           run({ "workspace", "forget", name })
         end
         root = opts.path or M.default_workspace_path(main_root, pr.number)
+        vim.fn.mkdir(vim.fn.fnamemodify(root, ":h"), "p")
         commands = { { "workspace", "add", "--name", name, "-r", merge_base, "-m", description, root } }
         -- `workspace add` must run from an existing workspace
         run_sequence(commands, function(ok, err)
@@ -477,8 +498,11 @@ function M.cleanup_review(state, callback)
   local previous = state.previous
 
   if state.mode == "workspace" then
-    if state.workspace and M.workspaces()[state.workspace] then
-      table.insert(commands, { "workspace", "remove", state.workspace })
+    local root = state.workspace and M.workspaces()[state.workspace]
+    if root then
+      -- `remove` also deletes the directory; a workspace whose directory is gone can only be forgotten
+      local verb = vim.fn.isdirectory(root) == 1 and "remove" or "forget"
+      table.insert(commands, { "workspace", verb, state.workspace })
     end
     target = state.main_root or "main workspace"
   elseif previous and exists(previous.change_id, cwd) then

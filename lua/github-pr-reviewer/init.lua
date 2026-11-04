@@ -7,7 +7,7 @@ local ui = require("github-pr-reviewer.ui")
 M.config = {
   review_mode = "workspace",      -- "workspace": review in a separate jj workspace (Neovim :cd's into it)
                                   -- "inplace": review change in the current workspace
-  workspace_path = nil,           -- fun(repo_root, pr_number) -> path; default: <repo_root>/../<repo>-pr-<n>
+  workspace_path = nil,           -- fun(repo_root, pr_number) -> path; default: ~/.prr/<github-repo>-pr-<n>
   picker = "native",              -- "native", "fzf-lua", "telescope"
   open_files_on_review = true,    -- open modified files after starting review
   show_comments = true,           -- show PR comments in buffers during review
@@ -5833,6 +5833,137 @@ function M._remove_review_session(entry, done)
       done()
     end
   end)
+end
+
+-- ===== Entry points for the bin/prr script =====
+
+local function review_entry_for(pr_number)
+  for _, entry in ipairs(jj.review_workspaces()) do
+    if entry.pr == pr_number then
+      return entry
+    end
+  end
+  return nil
+end
+
+-- Headless: make sure PR pr_number has a review workspace (fetch, create it, save its session),
+-- write its root to stdout and quit. Exits with code 1 (error on stderr) on failure.
+-- Inplace mode creates nothing: the repo root is printed and open_pr() starts the review.
+function M.prepare_pr(pr_number)
+  pr_number = tonumber(pr_number)
+  local function finish(root, err)
+    if root then
+      io.stdout:write(root .. "\n")
+      vim.cmd("qa!")
+    else
+      io.stderr:write((err or "unknown error") .. "\n")
+      vim.cmd("cquit! 1")
+    end
+  end
+
+  if not pr_number then
+    return finish(nil, "prepare_pr: invalid PR number")
+  end
+  local entry = review_entry_for(pr_number)
+  if entry then
+    return finish(entry.root)
+  end
+  local main_root = jj.workspaces().default or jj.root()
+  if not main_root then
+    return finish(nil, "Not in a jj repository")
+  end
+  jj.cwd = main_root
+  if M.config.review_mode == "inplace" then
+    return finish(main_root)
+  end
+
+  github.get_pr_for_review(pr_number, function(pr, err)
+    if not pr then
+      return finish(nil, "Error getting PR #" .. pr_number .. ": " .. (err or "unknown"))
+    end
+    local opts = { mode = "workspace" }
+    if M.config.workspace_path then
+      opts.path = M.config.workspace_path(main_root, pr.number)
+    end
+    jj.checkout_pr(pr, nil, opts, function(ok, checkout_err, state)
+      if not ok then
+        return finish(nil, "Error starting review: " .. (checkout_err or "unknown"))
+      end
+      vim.g.pr_review_number = pr.number
+      vim.g.pr_review_base_branch = pr.base_branch
+      state.mode = "workspace"
+      set_review_location(state)
+      jj.changed_files(state.merge_base, function(files)
+        vim.g.pr_review_modified_files = vim.tbl_map(function(f)
+          return { path = f.path, status = f.status }
+        end, files or {})
+        save_session()
+        finish(state.root)
+      end)
+    end)
+  end)
+end
+
+-- Open the review of PR pr_number: its saved session / review workspace if there is one,
+-- else start a new review (inplace mode, or a workspace that prepare_pr didn't create)
+function M.open_pr(pr_number)
+  pr_number = tonumber(pr_number)
+  local entry = pr_number and review_entry_for(pr_number)
+  if entry then
+    M._open_review_session(entry)
+    return
+  end
+  github.get_pr_for_review(pr_number, function(pr, err)
+    if not pr then
+      vim.notify("Error getting PR #" .. tostring(pr_number) .. ": " .. (err or "unknown"), vim.log.levels.ERROR)
+      return
+    end
+    M._do_start_review(pr)
+  end)
+end
+
+-- Headless: remove every review workspace of this repository (workspace + its directory, review
+-- change, saved session), report each on stdout and quit (exit code 1 if any removal failed).
+-- An inplace review (in the default workspace) is left alone.
+function M.cleanup_reviews()
+  local main_root = jj.workspaces().default or jj.root()
+  if not main_root then
+    io.stderr:write("Not in a jj repository\n")
+    vim.cmd("cquit! 1")
+    return
+  end
+  jj.cwd = main_root
+  local entries = vim.tbl_filter(function(entry)
+    return entry.name ~= "default"
+  end, jj.review_workspaces())
+
+  local failed = false
+  local function step(i)
+    local entry = entries[i]
+    if not entry then
+      vim.cmd(failed and "cquit! 1" or "qa!")
+      return
+    end
+    jj.cleanup_review({
+      mode = "workspace",
+      workspace = entry.name,
+      review_change = entry.change_id,
+      main_root = main_root,
+    }, function(ok, err)
+      if ok then
+        vim.fn.delete(get_session_file(entry.pr))
+        io.stdout:write(string.format("Removed the review of PR #%d (%s)\n", entry.pr, entry.root))
+      else
+        failed = true
+        io.stderr:write(string.format("Failed to remove the review of PR #%d (%s): %s\n", entry.pr, entry.root,
+          err or "unknown"))
+      end
+      vim.schedule(function()
+        step(i + 1)
+      end)
+    end)
+  end
+  step(1)
 end
 
 -- List the open reviews of this repository and open (or remove) one

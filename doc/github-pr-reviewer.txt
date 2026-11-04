@@ -282,8 +282,8 @@ review_mode             (string, default: "workspace")
 workspace_path          (function|nil, default: nil)
                         `function(repo_root, pr_number) -> path` for the
                         review workspace (workspace mode only). Default:
-                        sibling directory
-                        `<repo_root>/../<repo-name>-pr-<number>`
+                        `~/.prr/<github-repo-name>-pr-<number>` (repo name
+                        from the `origin` remote)
 
                                                      *github-pr-reviewer.picker*
 picker                  (string, default: "native")
@@ -419,6 +419,30 @@ Diffs are computed against the merge-base of the PR head and the base
 branch (`heads(::head & ::base@origin)`), the same base GitHub's "Files
 changed" uses, so base-only changes don't show up. Renames are shown as a
 delete + an add.
+
+FROM THE SHELL~
+                                                     *github-pr-reviewer-cli*
+`bin/prr` (needs `gh`, `jj` and `fzf`) picks a PR (review requested by
+default, CTRL-T toggles all open PRs, `--all` starts there, `prr <N>`
+skips the picker), `cd`s into its review workspace and starts Neovim
+reviewing it. A missing workspace is created first by a headless Neovim.
+Inside a jj repo it lists that repo's PRs; anywhere else the PRs of every
+jj repo up to two levels under `$PRR_REPO_DIRS` (default `~/proda:~`).
+
+`prr clean` removes the review workspaces of the current repo (workspace,
+directory, review change, session); `prr clean --all` those of every repo
+with a workspace in `~/.prr`, plus leftover directories there.
+
+`require("github-pr-reviewer").prepare_pr(N)`    *github-pr-reviewer.prepare_pr()*
+    Headless helper: create the review workspace of PR N (and save its
+    session), print its root and quit. Prints the repo root in inplace mode.
+
+`require("github-pr-reviewer").open_pr(N)`          *github-pr-reviewer.open_pr()*
+    Open the review of PR N: its existing review if any, else start one.
+
+`require("github-pr-reviewer").cleanup_reviews()`  *github-pr-reviewer.cleanup_reviews()*
+    Headless helper: remove every review workspace of the repository
+    (workspace and directory, review change, session) and quit.
 
 PENDING COMMENTS WORKFLOW~
                                                      *github-pr-reviewer-pending-comments*

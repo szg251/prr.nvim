@@ -121,7 +121,7 @@ require("github-pr-reviewer").setup({
   review_mode = "workspace",
 
   -- Optional function(repo_root, pr_number) -> path for the review workspace
-  -- (default: <repo_root>/../<repo-name>-pr-<number>)
+  -- (default: ~/.prr/<github-repo-name>-pr-<number>)
   workspace_path = nil,
 
   -- Picker for PR selection: "native", "fzf-lua", or "telescope"
@@ -306,7 +306,7 @@ jj workspace add --name pr-<N> -r <merge-base> -m "pr-review #<N>: <head> -> <ba
 jj restore --from <pr head>   # in the new workspace
 ```
 
-Neovim `:cd`s into the workspace, and back to where it came from when the review is cleaned up or put aside. Your original checkout is left untouched (no LSP or file-watcher churn). The workspace path defaults to a sibling directory, `<repo_root>/../<repo-name>-pr-<number>`; override it with `workspace_path`. If a `pr-<N>` workspace already exists (e.g. a review that was never cleaned up) it is reused.
+Neovim `:cd`s into the workspace, and back to where it came from when the review is cleaned up or put aside. Your original checkout is left untouched (no LSP or file-watcher churn). The workspace path defaults to `~/.prr/<github-repo-name>-pr-<number>` (the repository name from the `origin` remote, falling back to the repo directory's name); override it with `workspace_path`. If a `pr-<N>` workspace already exists (e.g. a review that was never cleaned up) it is reused.
 
 Tradeoff: files jj doesn't track (`node_modules`, `.env`, virtualenvs, ...) are not present in the new workspace, so LSP or builds may not work there. Use inplace mode if you need them.
 
@@ -320,6 +320,22 @@ Use `:PRListReviewRequests` to see PRs where you've been requested as a reviewer
 
 - Shows PR info with additions/deletions stats
 - **Enter**: Start reviewing the selected PR
+
+### From the Shell: `bin/prr`
+
+`bin/prr` (needs `gh`, `jj` and `fzf`) picks a PR, `cd`s into its review workspace and opens Neovim reviewing it. The terminal's cwd is the review workspace, so e.g. kitty opens new tabs there (over SSH the script reports the cwd to the terminal with OSC 7). Put `bin/` on your `PATH` (or symlink the script).
+
+```sh
+prr                # PRs where your review is requested; ctrl-t toggles to all open PRs
+prr --all          # start with all open PRs
+prr 123            # skip the picker (inside a repo)
+prr clean          # remove this repo's review workspaces (directories, review changes, sessions)
+prr clean --all    # ... of every repo with a review workspace in ~/.prr, plus leftover directories there
+```
+
+Inside a jj repo it lists that repo's PRs. Anywhere else it lists the PRs of every jj repo found up to two levels under `PRR_REPO_DIRS` (colon-separated, default `~/proda:~`), with a repo column, and `cd`s into the picked PR's repo first.
+
+`●` marks PRs that already have a review in progress. A new review workspace is created first by a headless Neovim (`require("github-pr-reviewer").prepare_pr(N)`), then Neovim is started in it with `require("github-pr-reviewer").open_pr(N)` (which you can also call yourself). In inplace mode Neovim starts in the repo root and creates the review change there.
 
 ### Review Buffer (Interactive File Browser)
 

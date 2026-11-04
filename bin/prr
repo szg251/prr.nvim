@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# prr: pick a PR, cd into its review workspace and open Neovim reviewing it
+# (github-pr-reviewer.nvim). Needs gh, jj and fzf.
+#
+#   prr                PRs where your review is requested (ctrl-t: all open PRs)
+#   prr --all          start with all open PRs
+#   prr <N>            skip the picker and review PR #N of this repo
+#   prr clean          remove this repo's review workspaces (directories, review changes, sessions)
+#   prr clean --all    ... of every repo with a review workspace in ~/.prr
+#
+# Inside a jj repo the PRs of that repo are listed; anywhere else the PRs of every jj repo found
+# up to two levels under $PRR_REPO_DIRS (colon-separated, default: ~/proda:~).
+set -euo pipefail
+
+die() {
+  echo "prr: $*" >&2
+  exit 1
+}
+
+for cmd in gh jj fzf nvim; do
+  command -v "$cmd" >/dev/null || die "'$cmd' not found in PATH"
+done
+
+# name<TAB>root<TAB>first line of the working-copy description, for every workspace of the repo
+workspaces() {
+  jj workspace list --ignore-working-copy \
+    -T 'name ++ "\t" ++ root ++ "\t" ++ target.description().first_line() ++ "\n"' 2>/dev/null
+}
+
+start_dir=$PWD
+prr_dir=$HOME/.prr
+repo_dirs=${PRR_REPO_DIRS:-$HOME/proda:$HOME}
+
+# Tell the terminal our cwd (OSC 7, the way shell integration does it): over SSH kitty can't read
+# the cwd of remote processes and uses the last reported one for new tabs/windows
+report_cwd() {
+  [[ -t 1 ]] || return 0
+  printf '\e]7;kitty-shell-cwd://%s%s\a' "$(hostname)" "$1"
+}
+
+# Default workspace root of the jj repo that dir belongs to
+repo_root_of() {
+  (cd "$1" && workspaces) | awk -F'\t' '$1 == "default" { print $2 }'
+}
+
+# name<TAB>root of the review workspaces (not the default one) of the repo at root
+review_workspaces_of() {
+  (cd "$1" && workspaces) | awk -F'\t' '$1 != "default" && $3 ~ /^pr-review #[0-9]+/ { print $1 "\t" $2 }'
+}
+
+# Comma-separated PR numbers with a review change in the repo at root ("pr-review #<N>: ...")
+reviewed_prs_of() {
+  (cd "$1" && workspaces) |
+    awk -F'\t' 'match($3, /^pr-review #[0-9]+/) { print substr($3, 12, RLENGTH - 11) }' | paste -sd, -
+}
+
+# owner/repo of the origin remote of the repo at root
+origin_slug_of() {
+  jj -R "$1" --ignore-working-copy git remote list 2>/dev/null |
+    awk '$1 == "origin" { print $2 }' | sed -E 's#^.*github\.com[:/]##; s#\.git$##; s#/+$##'
+}
+
+# owner/repo<TAB>root of the jj repos (default workspaces) under $repo_dirs
+local_repos() {
+  local bases base dir slug
+  IFS=: read -ra bases <<<"$repo_dirs"
+  for base in "${bases[@]}"; do
+    [[ -d "$base" ]] || continue
+    find "$base" -mindepth 1 -maxdepth 2 \( -name node_modules -o -name '.*' \) -prune -o -type d -print 2>/dev/null
+  done | while read -r dir; do
+    # Secondary workspaces have a .jj/repo file pointing to the repo, not a directory
+    [[ -d "$dir/.jj/repo" ]] || continue
+    slug=$(origin_slug_of "$dir")
+    [[ "$slug" == */* ]] && printf '%s\t%s\n' "$slug" "$dir"
+  done | awk -F'\t' '!seen[$1]++'
+}
+
+# PRs of repo slug (view: requested|all), as number<TAB>marker<TAB>repo<TAB>title<TAB>@author<TAB>head -> base
+# reviewed: comma-separated PR numbers to mark with ●
+list_repo_prs() {
+  local view=$1 slug=$2 reviewed=$3
+  local args=(pr list -R "$slug" --state open --limit 100 --json number,title,author,headRefName,baseRefName,isDraft)
+  [[ "$view" == requested ]] && args+=(--search "review-requested:@me")
+  gh "${args[@]}" --jq '
+    .[] | (.number | tostring) as $n | [
+      $n,
+      (if (",'"$reviewed"',") | contains("," + $n + ",") then "●" else " " end),
+      "'"$slug"'",
+      ((if .isDraft then "[draft] " else "" end) + .title),
+      ("@" + .author.login),
+      (.headRefName + " → " + .baseRefName)
+    ] | @tsv'
+}
+
+# prr clean [--all]: remove the review workspaces of this repo (--all: of every repo with one in
+# ~/.prr, plus directories in ~/.prr that are no longer jj workspaces)
+clean() {
+  local repos=() orphans=() dir root
+  if [[ "${1:-}" == --all ]]; then
+    for dir in "$prr_dir"/*/; do
+      [[ -d "$dir" ]] || continue
+      dir=${dir%/}
+      root=$(repo_root_of "$dir" 2>/dev/null) || root=""
+      # Not a workspace jj knows about any more (repo gone, workspace forgotten): just a directory
+      if [[ -z "$root" ]] || ! (cd "$dir" && workspaces) | cut -f2 | grep -qxF "$dir"; then
+        orphans+=("$dir")
+      elif [[ " ${repos[*]} " != *" $root "* ]]; then
+        repos+=("$root")
+      fi
+    done
+  elif [[ -n "${1:-}" ]]; then
+    die "unknown argument: $1"
+  else
+    root=$(repo_root_of "$PWD") && [[ -n "$root" ]] || die "not inside a jj repository (use 'prr clean --all')"
+    repos=("$root")
+  fi
+
+  local count=0 repo line
+  for repo in "${repos[@]}"; do
+    local entries
+    entries=$(review_workspaces_of "$repo")
+    [[ -n "$entries" ]] || continue
+    echo "${repo/#$HOME/\~}:"
+    while IFS=$'\t' read -r _ line; do
+      echo "  ${line/#$HOME/\~}"
+      count=$((count + 1))
+    done <<<"$entries"
+  done
+  if ((${#orphans[@]})); then
+    echo "Not jj workspaces any more (directory only):"
+    for dir in "${orphans[@]}"; do
+      echo "  ${dir/#$HOME/\~}"
+      count=$((count + 1))
+    done
+  fi
+  if ((count == 0)); then
+    echo "No review workspaces to remove."
+    return 0
+  fi
+
+  local answer
+  read -r -p "Remove these $count review workspace(s) and their directories? [y/N] " answer
+  [[ "$answer" == [yY]* ]] || return 0
+
+  local failed=0
+  for repo in "${repos[@]}"; do
+    [[ -n "$(review_workspaces_of "$repo")" ]] || continue
+    (cd "$repo" && nvim --headless -c "lua require('github-pr-reviewer').cleanup_reviews()") || failed=1
+  done
+  for dir in "${orphans[@]}"; do
+    rm -rf -- "$dir" && echo "Deleted $dir" || failed=1
+  done
+  [[ -d "$start_dir" ]] || echo "Your current directory was removed, cd somewhere else." >&2
+  return "$failed"
+}
+
+if [[ "${1:-}" == clean ]]; then
+  shift
+  clean "$@"
+  exit
+fi
+
+# Inside a jj repo: its PRs (from its default workspace). Anywhere else: the PRs of all local repos.
+default_root=$(repo_root_of "$PWD" 2>/dev/null) || default_root=""
+if [[ -n "$default_root" ]]; then
+  cd "$default_root"
+  repos=$(printf '%s\t%s\n' "$(origin_slug_of "$default_root")" "$default_root")
+  [[ "$(cut -f1 <<<"$repos")" == */* ]] || die "the origin remote of $default_root is not a GitHub repository"
+else
+  repos=$(local_repos)
+  [[ -n "$repos" ]] || die "not inside a jj repository, and no jj repositories found under $repo_dirs"
+fi
+
+# Rows of every repo in $repos, listed in parallel
+list_prs() {
+  local view=$1 tmp i=0 slug root
+  tmp=$(mktemp -d)
+  while IFS=$'\t' read -r slug root; do
+    list_repo_prs "$view" "$slug" "$(reviewed_prs_of "$root")" >"$tmp/$i" 2>"$tmp/$i.err" &
+    i=$((i + 1))
+  done <<<"$repos"
+  wait
+  cat "$tmp"/[0-9] "$tmp"/[0-9][0-9] 2>/dev/null || true
+  # Report failures only when everything failed (one inaccessible repo shouldn't hide the others)
+  if ! cat "$tmp"/[0-9] "$tmp"/[0-9][0-9] 2>/dev/null | grep -q .; then
+    cat "$tmp"/*.err >&2
+  fi
+  rm -rf "$tmp"
+}
+
+if [[ "${1:-}" == --list ]]; then
+  list_prs "${2:-requested}"
+  exit 0
+fi
+
+pr=""
+slug=""
+view=requested
+case "${1:-}" in
+  "") ;;
+  --all) view=all ;;
+  -h | --help)
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    [[ "$1" =~ ^#?([0-9]+)$ ]] || die "unknown argument: $1"
+    [[ -n "$default_root" ]] || die "not inside a jj repository: run 'prr <N>' from the PR's repository"
+    pr=${BASH_REMATCH[1]}
+    slug=$(cut -f1 <<<"$repos")
+    ;;
+esac
+
+if [[ -z "$pr" ]]; then
+  self=$(realpath "$0")
+  prs=$(list_prs "$view")
+  if [[ -z "$prs" && "$view" == requested ]]; then
+    echo "No PRs are requesting your review, showing all open PRs." >&2
+    view=all
+    prs=$(list_prs all)
+  fi
+  [[ -n "$prs" ]] || die "no open PRs"
+  # The repo column only matters when listing several repos
+  columns=1,2,4..
+  [[ -n "$default_root" ]] || columns=1..
+  selection=$(
+    printf '%s\n' "$prs" | fzf \
+      --delimiter '\t' \
+      --with-nth "$columns" \
+      --prompt "$view> " \
+      --header 'enter: review  ctrl-t: toggle requested / all open  ●: review in progress' \
+      --preview 'gh pr view {1} -R {3}' \
+      --preview-window 'right,55%,wrap' \
+      --bind "ctrl-t:transform:if [[ \$FZF_PROMPT == 'requested> ' ]]; then
+                echo 'change-prompt(all> )+reload(\"$self\" --list all)'
+              else
+                echo 'change-prompt(requested> )+reload(\"$self\" --list requested)'
+              fi"
+  ) || exit 0
+  pr=$(cut -f1 <<<"$selection")
+  slug=$(cut -f3 <<<"$selection")
+fi
+
+repo_root=$(awk -F'\t' -v slug="$slug" '$1 == slug { print $2; exit }' <<<"$repos")
+[[ -n "$repo_root" ]] || die "no local repository for $slug"
+cd "$repo_root"
+
+echo "Preparing the review of $slug#$pr..." >&2
+root=$(nvim --headless -c "lua require('github-pr-reviewer').prepare_pr($pr)") ||
+  die "could not prepare the review of $slug#$pr"
+root=$(tail -n1 <<<"$root")
+[[ -d "$root" ]] || die "prepare returned an invalid directory: '$root'"
+
+cd "$root"
+report_cwd "$root"
+status=0
+nvim -c "lua require('github-pr-reviewer').open_pr($pr)" || status=$?
+# Back in the shell's directory: report it again, the shell may not until its next cd
+report_cwd "$start_dir"
+exit "$status"
