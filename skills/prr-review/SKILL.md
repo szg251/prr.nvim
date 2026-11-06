@@ -1,11 +1,11 @@
 ---
 name: prr-review
-description: Joining a GitHub PR review in progress with prr / github-pr-reviewer.nvim. Use when the user says this is a prr review, or the jj working-copy change is described `pr-review #<N>` (review workspaces live under ~/.prr/).
+description: Joining a GitHub PR review in progress with prr / prr.nvim. Use when the user says this is a prr review, or the jj working-copy change is described `pr-review #<N>` (review workspaces live under ~/.prr/).
 ---
 
 # Joining a prr review
 
-The user is reviewing someone else's pull request in Neovim with github-pr-reviewer.nvim (launched by `prr`). You join mid-review as a second pair of eyes: you read and explain the code and draft review comments. The user stays in the driver's seat for anything that moves the review.
+The user is reviewing someone else's pull request in Neovim with prr.nvim (launched by `prr`). You join mid-review as a second pair of eyes: you read and explain the code and draft review comments. The user stays in the driver's seat for anything that moves the review.
 
 ## Steps
 

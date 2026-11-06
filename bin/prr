@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prr: pick a PR, cd into its review workspace and open Neovim reviewing it
-# (github-pr-reviewer.nvim). Needs gh, jj and fzf.
+# (prr.nvim). Needs gh, jj and fzf.
 #
 #   prr                PRs where your review is requested (ctrl-t: all open PRs)
 #   prr -a, --all      start with all open PRs
@@ -175,7 +175,7 @@ remove_reviews() {
   local failed=0 repo dir
   for repo in "${review_repos[@]}"; do
     [[ -n "$(review_entries_of "$repo")" ]] || continue
-    (cd "$repo" && nvim --headless -c "lua require('github-pr-reviewer').cleanup_reviews()") || failed=1
+    (cd "$repo" && nvim --headless -c "lua require('prr').cleanup_reviews()") || failed=1
   done
   for dir in "${orphan_dirs[@]}"; do
     rm -rf -- "$dir" && echo "Deleted $dir" || failed=1
@@ -200,7 +200,7 @@ esac
 # prr context [N]: the review's context as JSON (for agents), from inside a review workspace
 if [[ "${1:-}" == context ]]; then
   [[ -z "${2:-}" || "$2" =~ ^#?[0-9]+$ ]] || die "usage: prr context [<N>]"
-  exec nvim --headless -c "lua require('github-pr-reviewer').dump_context(${2:+${2#\#}})"
+  exec nvim --headless -c "lua require('prr').dump_context(${2:+${2#\#}})"
 fi
 
 # Inside a jj repo: its PRs (from its default workspace). Anywhere else: the PRs of all local repos.
@@ -289,7 +289,7 @@ repo_root=$(awk -F'\t' -v slug="$slug" '$1 == slug { print $2; exit }' <<<"$repo
 cd "$repo_root"
 
 echo "Preparing the review of $slug#$pr..." >&2
-root=$(nvim --headless -c "lua require('github-pr-reviewer').prepare_pr($pr)") ||
+root=$(nvim --headless -c "lua require('prr').prepare_pr($pr)") ||
   die "could not prepare the review of $slug#$pr"
 root=$(tail -n1 <<<"$root")
 [[ -d "$root" ]] || die "prepare returned an invalid directory: '$root'"
@@ -297,7 +297,7 @@ root=$(tail -n1 <<<"$root")
 cd "$root"
 report_cwd "$root"
 status=0
-nvim -c "lua require('github-pr-reviewer').open_pr($pr)" || status=$?
+nvim -c "lua require('prr').open_pr($pr)" || status=$?
 # Back in the shell's directory: report it again, the shell may not until its next cd
 report_cwd "$start_dir"
 exit "$status"

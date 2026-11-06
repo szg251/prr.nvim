@@ -1,30 +1,30 @@
-*github-pr-reviewer.txt*    GitHub Pull Request Reviewer for Neovim
+*prr.txt*    GitHub Pull Request Reviewer for Neovim
 
-                      GITHUB PR REVIEWER~
+                      PRR~
 
 Author:  Otávio Schwanck dos Santos
 License: MIT
-Repository: https://github.com/otavioschwanck/github-pr-reviewer.nvim
+Repository: https://github.com/szg251/prr.nvim
 
 ==============================================================================
-CONTENTS                                            *github-pr-reviewer-contents*
+CONTENTS                                                        *prr-contents*
 
-    1. Introduction ...................... |github-pr-reviewer-intro|
-    2. Requirements ...................... |github-pr-reviewer-requirements|
-    3. Installation ...................... |github-pr-reviewer-installation|
-    4. Quick Start ....................... |github-pr-reviewer-quickstart|
-    5. Commands .......................... |github-pr-reviewer-commands|
-    6. Configuration ..................... |github-pr-reviewer-config|
-    7. Workflows ......................... |github-pr-reviewer-workflows|
-    8. Keymaps ........................... |github-pr-reviewer-keymaps|
-    9. Integration ....................... |github-pr-reviewer-integration|
-   10. Troubleshooting ................... |github-pr-reviewer-troubleshooting|
-   11. License ........................... |github-pr-reviewer-license|
+    1. Introduction ...................... |prr-intro|
+    2. Requirements ...................... |prr-requirements|
+    3. Installation ...................... |prr-installation|
+    4. Quick Start ....................... |prr-quickstart|
+    5. Commands .......................... |prr-commands|
+    6. Configuration ..................... |prr-config|
+    7. Workflows ......................... |prr-workflows|
+    8. Keymaps ........................... |prr-keymaps|
+    9. Integration ....................... |prr-integration|
+   10. Troubleshooting ................... |prr-troubleshooting|
+   11. License ........................... |prr-license|
 
 ==============================================================================
-1. INTRODUCTION                                        *github-pr-reviewer-intro*
+1. INTRODUCTION                                                    *prr-intro*
 
-GitHub PR Reviewer is a powerful Neovim plugin for reviewing GitHub Pull
+prr is a powerful Neovim plugin for reviewing GitHub Pull
 Requests directly in your editor. Review PRs with the full power of your
 development environment - LSP, navigation, favorite files, and all your
 familiar tools.
@@ -46,7 +46,7 @@ Review faster, review better. Use the same environment where you write code
 to review it.
 
 ==============================================================================
-2. REQUIREMENTS                                   *github-pr-reviewer-requirements*
+2. REQUIREMENTS                                             *prr-requirements*
 
 • Neovim >= 0.11.0
 • GitHub CLI (`gh`) installed and authenticated
@@ -55,14 +55,14 @@ to review it.
 • Optional: bat for syntax-highlighted previews in fzf-lua
 
 ==============================================================================
-3. INSTALLATION                                   *github-pr-reviewer-installation*
+3. INSTALLATION                                             *prr-installation*
 
 Using lazy.nvim: >lua
     {
-      "otavioschwanck/github-pr-reviewer.nvim",
+      "szg251/prr.nvim",
       config = function()
-        require("github-pr-reviewer").setup({
-          -- options (see |github-pr-reviewer-config|)
+        require("prr").setup({
+          -- options (see |prr-config|)
         })
       end,
     }
@@ -70,9 +70,9 @@ Using lazy.nvim: >lua
 
 Using packer.nvim: >lua
     use {
-      "otavioschwanck/github-pr-reviewer.nvim",
+      "szg251/prr.nvim",
       config = function()
-        require("github-pr-reviewer").setup()
+        require("prr").setup()
       end
     }
 <
@@ -80,11 +80,11 @@ Using packer.nvim: >lua
 After installation, run `:helptags ALL` to generate help tags.
 
 ==============================================================================
-4. QUICK START                                      *github-pr-reviewer-quickstart*
+4. QUICK START                                                *prr-quickstart*
 
 1. Run |:PRListReviewRequests| to see PRs requesting your review
 2. Select a PR to review (Neovim |:cd|s into its review workspace, see
-   |github-pr-reviewer-review-modes|)
+   |prr-review-modes|)
 3. Use |:PRReviewBuffer| to see all changed files
 4. Navigate with LSP (gd, gr, K) and your favorite tools
 5. Add pending comments with |:PRPendingComment|
@@ -95,7 +95,7 @@ No need to commit or stash anything first: jj always snapshots your work
 into its own change, which the review never touches.
 
 ==============================================================================
-5. COMMANDS                                          *github-pr-reviewer-commands*
+5. COMMANDS                                                     *prr-commands*
 
 MAIN MENU~
                                                      *:PR*
@@ -113,7 +113,7 @@ REVIEW WORKFLOW~
                         open PRs. Fetches the PR with `jj git fetch` and
                         creates a review change on the merge-base with
                         the PR head's files restored into it (see
-                        |github-pr-reviewer-review-modes|).
+                        |prr-review-modes|).
 
                                                      *:PRListReviewRequests*
 :PRListReviewRequests   List PRs where you are requested as a reviewer.
@@ -148,7 +148,7 @@ REVIEW WORKFLOW~
 :PRReviewSessions       List the open reviews of the repository (every
                         workspace whose working copy is a `pr-review #<N>`
                         change) and open, switch to, or remove one
-                        (<C-d>). See |github-pr-reviewer-session|.
+                        (<C-d>). See |prr-session|.
 
                                                      *:PRLoadLastSession*
 :PRLoadLastSession      Restore the last PR review session after
@@ -231,11 +231,11 @@ REVIEW ACTIONS~
                         review.
 
 ==============================================================================
-6. CONFIGURATION                                       *github-pr-reviewer-config*
+6. CONFIGURATION                                                  *prr-config*
 
 Configure the plugin by calling the setup function: >lua
 
-    require("github-pr-reviewer").setup({
+    require("prr").setup({
       -- "workspace": review in a separate jj workspace (:cd into it)
       -- "inplace": review change in the current workspace
       review_mode = "workspace",
@@ -285,102 +285,102 @@ Configure the plugin by calling the setup function: >lua
 <
 
 OPTIONS~
-                                                     *github-pr-reviewer.review_mode*
+                                                             *prr.review_mode*
 review_mode             (string, default: "workspace")
                         Where the review happens. Options:
                         "workspace" - separate jj workspace; Neovim
                                       |:cd|s into it
                         "inplace"   - review change in the current
                                       workspace
-                        See |github-pr-reviewer-review-modes|.
+                        See |prr-review-modes|.
 
-                                                     *github-pr-reviewer.workspace_path*
+                                                          *prr.workspace_path*
 workspace_path          (function|nil, default: nil)
                         `function(repo_root, pr_number) -> path` for the
                         review workspace (workspace mode only). Default:
                         `~/.prr/<github-repo-name>-pr-<number>` (repo name
                         from the `origin` remote)
 
-                                                     *github-pr-reviewer.picker*
+                                                                  *prr.picker*
 picker                  (string, default: "native")
                         Picker to use for PR selection and other lists.
                         Options: "native", "fzf-lua", "telescope"
 
-                                                     *github-pr-reviewer.open_files_on_review*
+                                                    *prr.open_files_on_review*
 open_files_on_review    (boolean, default: true)
                         Open modified files after starting a review.
 
-                                                     *github-pr-reviewer.show_comments*
+                                                           *prr.show_comments*
 show_comments           (boolean, default: true)
                         Show PR comments as virtual text in buffers.
                         Commented lines also get a sign in the sign column
                         (💬 posted, ⏳ pending; C / P without
-                        |github-pr-reviewer.show_icons|).
+                        |prr.show_icons|).
 
-                                          *github-pr-reviewer.comment_indicator_position*
+                                              *prr.comment_indicator_position*
 comment_indicator_position (string, default: "right_align")
                         Where the comment count of a commented line is
                         shown: "right_align" (right edge of the window) or
                         "eol" (right after the line's text).
 
-                                                     *github-pr-reviewer.show_icons*
+                                                              *prr.show_icons*
 show_icons              (boolean, default: true)
                         Show icons/emojis in UI. Set to false for a
                         text-only interface.
 
-                                                     *github-pr-reviewer.show_floats*
+                                                             *prr.show_floats*
 show_floats             (boolean, default: true)
                         Show floating windows with PR info, stats, and
                         keymaps during review. Can be toggled on/off with
-                        |github-pr-reviewer.toggle_floats_key|.
+                        |prr.toggle_floats_key|.
 
-                                                     *github-pr-reviewer.mark_as_viewed_key*
+                                                      *prr.mark_as_viewed_key*
 mark_as_viewed_key      (string, default: "<CR>")
                         Key to mark file as viewed and jump to next file.
                         Only works in review mode.
 
-                                                     *github-pr-reviewer.toggle_floats_key*
+                                                       *prr.toggle_floats_key*
 toggle_floats_key       (string, default: "<C-r>")
                         Key to toggle floating windows visibility. Only
                         works in review mode.
 
-                                                     *github-pr-reviewer.review_sessions_delete_key*
+                                              *prr.review_sessions_delete_key*
 review_sessions_delete_key (string, default: "<C-d>")
                         Remove the selected review (workspace, review
                         change and session) in the |:PRReviewSessions|
                         picker (telescope, fzf-lua; the native picker asks
                         Open / Remove).
 
-                                                     *github-pr-reviewer.commit_mode_toggle_key*
+                                                  *prr.commit_mode_toggle_key*
 commit_mode_toggle_key  (string, default: "<C-t>")
                         Toggle between reviewing the whole PR and single
-                        commits. See |github-pr-reviewer-commit-mode|.
+                        commits. See |prr-commit-mode|.
 
-                                                     *github-pr-reviewer.next_commit_key*
-                                                     *github-pr-reviewer.prev_commit_key*
+                                                         *prr.next_commit_key*
+                                                         *prr.prev_commit_key*
 next_commit_key         (string, default: "<C-n>")
 prev_commit_key         (string, default: "<C-p>")
                         Go to the next / previous commit. From PR mode they
                         enter commit mode at the first / last commit.
 
-                                             *github-pr-reviewer.sync_viewed_with_github*
+                                                 *prr.sync_viewed_with_github*
 sync_viewed_with_github (boolean, default: true)
                         Sync the viewed state of files with GitHub's
                         "Viewed" checkboxes, both ways. See
-                        |github-pr-reviewer-commit-mode|.
+                        |prr-commit-mode|.
 
-                                                     *github-pr-reviewer.next_file_key*
+                                                           *prr.next_file_key*
 next_file_key           (string, default: "<C-l>")
                         Key to go to next modified file. Only works in
                         review mode.
 
-                                                     *github-pr-reviewer.prev_file_key*
+                                                           *prr.prev_file_key*
 prev_file_key           (string, default: "<C-h>")
                         Key to go to previous modified file. Only works
                         in review mode.
 
 ==============================================================================
-7. WORKFLOWS                                       *github-pr-reviewer-workflows*
+7. WORKFLOWS                                                   *prr-workflows*
 
 BASIC REVIEW WORKFLOW~
 
@@ -412,14 +412,14 @@ BASIC REVIEW WORKFLOW~
 <
 
 REVIEW MODES~
-                                                     *github-pr-reviewer-review-modes*
+                                                            *prr-review-modes*
 
 Starting a review runs `jj git fetch` (only the base branch from origin and
 the head branch from origin or the fork remote) and creates a review
 change, whose description starts with `pr-review #<N>`. The review change
 sits on the merge-base with the PR head's files restored into it: files on
 disk are exactly the PR head, while git's HEAD (colocated repo) is the diff
-base, so git tools show the PR's changes (see |github-pr-reviewer-diffs|).
+base, so git tools show the PR's changes (see |prr-diffs|).
 The PR's commits are never the working copy, so local edits can't rewrite
 them; they go into the throwaway review change.
 
@@ -452,7 +452,7 @@ changed" uses, so base-only changes don't show up. Renames are shown as a
 delete + an add.
 
 FROM THE SHELL~
-                                                     *github-pr-reviewer-cli*
+                                                                     *prr-cli*
 `bin/prr` (needs `gh`, `jj` and `fzf`) picks a PR (review requested by
 default, CTRL-T toggles all open PRs, `--all` starts there, `prr <N>`
 skips the picker), `cd`s into its review workspace and starts Neovim
@@ -466,19 +466,19 @@ removes them (workspace, directory, review change, session); `prr rm -a`
 those of every repo with a workspace in `~/.prr`, plus leftover directories
 there.
 
-`require("github-pr-reviewer").prepare_pr(N)`    *github-pr-reviewer.prepare_pr()*
+`require("prr").prepare_pr(N)`                              *prr.prepare_pr()*
     Headless helper: create the review workspace of PR N (and save its
     session), print its root and quit. Prints the repo root in inplace mode.
 
-`require("github-pr-reviewer").open_pr(N)`          *github-pr-reviewer.open_pr()*
+`require("prr").open_pr(N)`                                    *prr.open_pr()*
     Open the review of PR N: its existing review if any, else start one.
 
-`require("github-pr-reviewer").cleanup_reviews()`  *github-pr-reviewer.cleanup_reviews()*
+`require("prr").cleanup_reviews()`                     *prr.cleanup_reviews()*
     Headless helper: remove every review workspace of the repository
     (workspace and directory, review change, session) and quit.
 
 PENDING COMMENTS WORKFLOW~
-                                                     *github-pr-reviewer-pending-comments*
+                                                        *prr-pending-comments*
 
 The most efficient way to review is using pending comments:
 
@@ -498,9 +498,9 @@ Benefits:
 • Edit or delete pending comments before submission
 
 NAVIGATION~
-                                                     *github-pr-reviewer-navigation*
+                                                              *prr-navigation*
 
-For hunks within a file, use your git tools (see |github-pr-reviewer-diffs|).
+For hunks within a file, use your git tools (see |prr-diffs|).
 
 File Navigation (between modified files):
 • <C-l> (default) - Go to next modified file
@@ -513,7 +513,7 @@ View Controls:
 All keybindings are configurable and only activate during PR review mode.
 
 COMMIT-BASED REVIEWING~
-                                                     *github-pr-reviewer-commit-mode*
+                                                             *prr-commit-mode*
 Review the PR one commit at a time instead of all at once:
 
 • <C-t> (default) - Toggle between the whole PR and single commits (the
@@ -542,7 +542,7 @@ once it is viewed in every commit that changes it. Marking a file viewed in PR
 mode marks it in all of its commits. Viewed state is stored per commit SHA, so
 after a force-push the rewritten commits start unviewed.
 
-Viewed state is synced with GitHub (|github-pr-reviewer.sync_viewed_with_github|).
+Viewed state is synced with GitHub (|prr.sync_viewed_with_github|).
 GitHub's "Viewed" checkbox is per file for the whole PR, so it follows the
 PR-level state: a file is marked viewed on GitHub once it is viewed in every
 commit that changes it, and unmarked as soon as it isn't. When a review starts,
@@ -558,7 +558,7 @@ against a single commit.
 Unsaved edits in review buffers are discarded when switching commits.
 
 REVIEW BUFFER~
-                                                     *github-pr-reviewer-review-buffer*
+                                                           *prr-review-buffer*
 
 The review buffer is an interactive file browser showing all changed files:
 
@@ -580,7 +580,7 @@ The review buffer is an interactive file browser showing all changed files:
   commit is bold (`PRReviewCurrent`). Override them with |nvim_set_hl()|.
 
 CHANGE PROGRESS INDICATOR~
-                                                     *github-pr-reviewer-progress-indicator*
+                                                      *prr-progress-indicator*
 
 When reviewing a file of the PR, three floating windows provide context:
 
@@ -601,7 +601,7 @@ Toggle Floating Windows:
 • Useful when you want a cleaner view or need more screen space
 
 VIEWING DIFFS~
-                                                     *github-pr-reviewer-diffs*
+                                                                   *prr-diffs*
 
 The plugin doesn't draw diffs itself. Because git's HEAD in the review
 checkout is the diff base, your git tools show exactly the PR's changes (or
@@ -617,7 +617,7 @@ can't be shown by git tools from the file list, so the plugin opens them as
 a read-only `<path> [DELETED]` buffer with the base content.
 
 SESSION PERSISTENCE~
-                                                     *github-pr-reviewer-session*
+                                                                 *prr-session*
 
 The plugin automatically saves your review session state:
 
@@ -649,10 +649,10 @@ its session is saved and Neovim |:cd|s out, its workspace stays. <C-d>
 In workspace mode this |:cd|s into the review workspace.
 
 Session files are stored in:
-    ~/.local/share/nvim/github-pr-reviewer-sessions/
+    ~/.local/share/nvim/prr-sessions/
 
 ==============================================================================
-8. KEYMAPS                                           *github-pr-reviewer-keymaps*
+8. KEYMAPS                                                       *prr-keymaps*
 
 RECOMMENDED KEYMAPS~
 
@@ -710,11 +710,11 @@ mode (they won't interfere with normal usage):
 • <C-r> (configurable) - Toggle floating windows visibility
 
 ==============================================================================
-9. INTEGRATION                                   *github-pr-reviewer-integration*
+9. INTEGRATION                                               *prr-integration*
 
 ARROW.NVIM / HARPOON~
-                                                     *github-pr-reviewer-arrow*
-                                                     *github-pr-reviewer-harpoon*
+                                                                   *prr-arrow*
+                                                                 *prr-harpoon*
 
 Mark files you want to return to during review: >lua
 
@@ -729,7 +729,7 @@ Both plugins work seamlessly during PR review, letting you mark important
 files and jump between them quickly.
 
 LSP~
-                                                     *github-pr-reviewer-lsp*
+                                                                     *prr-lsp*
 
 Your LSP is fully functional during PR review:
 • gd - Go to definition
@@ -742,12 +742,12 @@ This is a huge advantage over web-based PR review - you can explore the
 full codebase with full language intelligence.
 
 TELESCOPE / FZF-LUA~
-                                                     *github-pr-reviewer-telescope*
-                                                     *github-pr-reviewer-fzf-lua*
+                                                               *prr-telescope*
+                                                                 *prr-fzf-lua*
 
 Set your preferred picker in the config: >lua
 
-    require("github-pr-reviewer").setup({
+    require("prr").setup({
       picker = "telescope",  -- or "fzf-lua" or "native"
     })
 <
@@ -758,7 +758,7 @@ Telescope and fzf-lua provide enhanced comment browsing with file previews:
 • fzf-lua: File preview with bat/cat showing context around the comment
 
 GITSIGNS.NVIM~
-                                                     *github-pr-reviewer-gitsigns*
+                                                                *prr-gitsigns*
 
 gitsigns.nvim is the recommended way to see the PR's hunks (the plugin has
 no built-in diff view). In a colocated jj + git repo, git's HEAD in the
@@ -776,10 +776,10 @@ commit's in commit mode): >lua
     vim.keymap.set("n", "<leader>hp", gs.preview_hunk)
 <
 With vim-fugitive, `:Gvdiffsplit` shows the current file side by side with
-the diff base. See |github-pr-reviewer-diffs|.
+the diff base. See |prr-diffs|.
 
 ==============================================================================
-10. TROUBLESHOOTING                          *github-pr-reviewer-troubleshooting*
+10. TROUBLESHOOTING                                      *prr-troubleshooting*
 
 NOT ON A REVIEW CHANGE~
 
@@ -836,7 +836,7 @@ Install bat for syntax-highlighted previews: >bash
 If `bat` is not available, the plugin falls back to `cat`.
 
 ==============================================================================
-11. LICENSE                                          *github-pr-reviewer-license*
+11. LICENSE                                                      *prr-license*
 
 MIT License
 

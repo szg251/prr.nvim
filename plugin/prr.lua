@@ -1,12 +1,12 @@
-if vim.g.loaded_github_pr_reviewer then
+if vim.g.loaded_prr then
   return
 end
-vim.g.loaded_github_pr_reviewer = true
+vim.g.loaded_prr = true
 
 vim.api.nvim_create_user_command("PRReview", function()
-  require("github-pr-reviewer").review_pr()
+  require("prr").review_pr()
 end, { desc = "Select and review a GitHub PR" })
 
 vim.api.nvim_create_user_command("PRReviewCleanup", function()
-  require("github-pr-reviewer").cleanup_review_branch()
+  require("prr").cleanup_review_branch()
 end, { desc = "Exit the review and clean up its jj workspace or change" })

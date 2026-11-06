@@ -5,17 +5,17 @@ M._pr_node_ids = {} -- PR number -> GraphQL node id
 
 -- Debug logging helper
 local function debug_log(msg)
-  local pr_reviewer = require("github-pr-reviewer")
-  if pr_reviewer.config.debug then
+  local prr = require("prr")
+  if prr.config.debug then
     vim.notify(msg, vim.log.levels.INFO)
   end
 end
 
 function M.list_open_prs()
-  local pr_reviewer = require("github-pr-reviewer")
+  local prr = require("prr")
   local result = vim.fn.system(
     string.format("gh pr list --state open --limit %d --json number,title,headRefName,baseRefName,author,headRepository,headRepositoryOwner,isCrossRepository,labels,headRefOid",
-      pr_reviewer.config.pr_list_limit)
+      prr.config.pr_list_limit)
   )
 
   if vim.v.shell_error ~= 0 then
@@ -149,10 +149,10 @@ function M.get_pr_details(pr_number, callback)
 end
 
 function M.list_review_requests(callback)
-  local pr_reviewer = require("github-pr-reviewer")
+  local prr = require("prr")
   local cmd = string.format(
     "gh pr list --search 'is:open review-requested:@me' --limit %d --json number,title,headRefName,baseRefName,author,updatedAt,additions,deletions,headRepositoryOwner,headRepository,isCrossRepository",
-    pr_reviewer.config.pr_list_limit
+    prr.config.pr_list_limit
   )
 
   vim.fn.jobstart(cmd, {

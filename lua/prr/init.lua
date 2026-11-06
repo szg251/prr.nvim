@@ -1,8 +1,8 @@
 local M = {}
 
-local github = require("github-pr-reviewer.github")
-local jj = require("github-pr-reviewer.jj")
-local ui = require("github-pr-reviewer.ui")
+local github = require("prr.github")
+local jj = require("prr.jj")
+local ui = require("prr.ui")
 
 M.config = {
   review_mode = "workspace",      -- "workspace": review in a separate jj workspace (Neovim :cd's into it)
@@ -81,7 +81,13 @@ M._review_sort = nil         -- Current sort (uses config default)
 
 local function get_session_dir()
   local data_path = vim.fn.stdpath("data")
-  return data_path .. "/github-pr-reviewer-sessions"
+  local dir = data_path .. "/prr-sessions"
+  -- Sessions saved under the plugin's old name
+  local old = data_path .. "/github-pr-reviewer-sessions"
+  if vim.fn.isdirectory(dir) == 0 and vim.fn.isdirectory(old) == 1 then
+    vim.fn.rename(old, dir)
+  end
+  return dir
 end
 
 -- Root directory of the files under review (the review workspace in workspace mode)
@@ -1441,12 +1447,12 @@ local function setup_review_buffer_keymaps(bufnr)
   })
 
   -- Store the callback in a global table so it can be called
-  _G._pr_reviewer_open_file = function()
+  _G._prr_open_file = function()
     open_file_from_review(nil)
   end
 
   -- Open file - using nvim_buf_set_keymap for compatibility
-  vim.api.nvim_buf_set_keymap(bufnr, "n", "<CR>", [[<Cmd>lua _G._pr_reviewer_open_file()<CR>]],
+  vim.api.nvim_buf_set_keymap(bufnr, "n", "<CR>", [[<Cmd>lua _G._prr_open_file()<CR>]],
     { noremap = true, silent = true, nowait = true })
 
   -- Mouse: single click folds (directory, current commit), double click opens a file or enters a
@@ -5050,11 +5056,11 @@ function M.setup(opts)
 
   vim.api.nvim_create_user_command("PRReviewMenu", function()
     M.show_review_menu()
-  end, { desc = "Show PR Reviewer command menu" })
+  end, { desc = "Show prr command menu" })
 
   vim.api.nvim_create_user_command("PR", function()
     M.show_review_menu()
-  end, { desc = "Show PR Reviewer command menu (alias for PRReviewMenu)" })
+  end, { desc = "Show prr command menu (alias for PRReviewMenu)" })
 
   -- Visual mode suggestion command
   -- Recommended keybind: vim.keymap.set('v', '<leader>gs', ':<C-u>\'<,\'>PRSuggestChange<CR>', { desc = 'Suggest change' })

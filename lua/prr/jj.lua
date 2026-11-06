@@ -16,8 +16,8 @@ M.cwd = nil
 
 -- Debug logging helper
 local function debug_log(msg)
-  local pr_reviewer = require("github-pr-reviewer")
-  if pr_reviewer.config.debug then
+  local prr = require("prr")
+  if prr.config.debug then
     vim.notify(msg, vim.log.levels.INFO)
   end
 end

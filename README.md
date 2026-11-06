@@ -1,6 +1,8 @@
-# GitHub PR Reviewer for Neovim
+# prr
 
 A powerful Neovim plugin for reviewing GitHub Pull Requests directly in your editor. Review PRs with the full power of your development environment - LSP, navigation, favorite files, and all your familiar tools.
+
+prr is a fork of [github-pr-reviewer.nvim](https://github.com/otavioschwanck/github-pr-reviewer.nvim) by Otávio Schwanck, reworked around jj (Jujutsu) review workspaces, with a `prr` shell entry point.
 
 ![demo](https://i.imgur.com/WsYYVQy.gif)
 ![menu](https://i.imgur.com/77Tc8HS.png)
@@ -70,7 +72,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 
 ```lua
 {
-  "otavioschwanck/github-pr-reviewer.nvim",
+  "szg251/prr.nvim",
   opts = {
     -- options here
   },
@@ -85,9 +87,9 @@ It is a experimental project and may contain bugs. Use at your own risk.
 
 ```lua
 use {
-  "otavioschwanck/github-pr-reviewer.nvim",
+  "szg251/prr.nvim",
   config = function()
-    require("github-pr-reviewer").setup()
+    require("prr").setup()
 
     -- Recommended keymaps
     vim.keymap.set("n", "<leader>p", "<cmd>PRReviewMenu<cr>", { desc = "PR Review Menu" })
@@ -99,11 +101,11 @@ use {
 ### [vim-plug](https://github.com/junegunn/vim-plug)
 
 ```vim
-Plug 'otavioschwanck/github-pr-reviewer.nvim'
+Plug 'szg251/prr.nvim'
 
 " In your init.vim or init.lua
 lua << EOF
-  require("github-pr-reviewer").setup()
+  require("prr").setup()
 
   -- Recommended keymaps
   vim.keymap.set("n", "<leader>p", "<cmd>PRReviewMenu<cr>", { desc = "PR Review Menu" })
@@ -114,7 +116,7 @@ EOF
 ## Configuration
 
 ```lua
-require("github-pr-reviewer").setup({
+require("prr").setup({
   -- Where to review: "workspace" (default) checks the PR out in a separate jj
   -- workspace and :cd's into it; "inplace" creates the review change in the
   -- current workspace
@@ -341,7 +343,7 @@ prr rm -a, --all   # ... of every repo with a review workspace in ~/.prr, plus l
 
 Inside a jj repo it lists that repo's PRs. Anywhere else it lists the PRs of every jj repo found up to two levels under `PRR_REPO_DIRS` (colon-separated, default `~/proda:~`), with a repo column, and `cd`s into the picked PR's repo first.
 
-`●` marks PRs that already have a review in progress. A new review workspace is created first by a headless Neovim (`require("github-pr-reviewer").prepare_pr(N)`), then Neovim is started in it with `require("github-pr-reviewer").open_pr(N)` (which you can also call yourself). In inplace mode Neovim starts in the repo root and creates the review change there.
+`●` marks PRs that already have a review in progress. A new review workspace is created first by a headless Neovim (`require("prr").prepare_pr(N)`), then Neovim is started in it with `require("prr").open_pr(N)` (which you can also call yourself). In inplace mode Neovim starts in the repo root and creates the review change there.
 
 ### Bringing an Agent into a Review
 
@@ -551,7 +553,7 @@ To restore a session after restarting Neovim:
 
 In workspace mode, restoring a session `:cd`s into the review workspace.
 
-Session files are stored in `~/.local/share/nvim/github-pr-reviewer-sessions/`.
+Session files are stored in `~/.local/share/nvim/prr-sessions/`.
 
 ### Finishing the Review
 
@@ -674,7 +676,7 @@ Your LSP is fully functional during PR review:
 Set your preferred picker in the config:
 
 ```lua
-require("github-pr-reviewer").setup({
+require("prr").setup({
   picker = "telescope",  -- or "fzf-lua" or "native"
 })
 ```

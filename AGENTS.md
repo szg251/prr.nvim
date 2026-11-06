@@ -1,6 +1,6 @@
-# Agent Guide - github-pr-reviewer.nvim
+# Agent Guide - prr.nvim
 
-This document contains essential information about the architecture, patterns, and important details of the `neovim-pr-reviewer` plugin. `CLAUDE.md` imports it.
+This document contains essential information about the architecture, patterns, and important details of the `prr` plugin. `CLAUDE.md` imports it.
 
 ## The prr-review Skill Stays True
 
@@ -26,12 +26,12 @@ Neovim/Lua plugin for reviewing GitHub Pull Requests directly in the editor, wit
 ## Main Architecture
 
 ### Main File
-- **`lua/github-pr-reviewer/init.lua`** (~5700 lines): Contains all plugin logic
+- **`lua/prr/init.lua`** (~5700 lines): Contains all plugin logic
 
 ### Auxiliary Modules
-- **`lua/github-pr-reviewer/github.lua`**: GitHub GraphQL API interaction
-- **`lua/github-pr-reviewer/ui.lua`**: UI components (pickers, menus)
-- **`lua/github-pr-reviewer/jj.lua`**: jj (Jujutsu) interaction - fetch, review workspace/change creation, cleanup, changed files, base content (replaces the old `git.lua`)
+- **`lua/prr/github.lua`**: GitHub GraphQL API interaction
+- **`lua/prr/ui.lua`**: UI components (pickers, menus)
+- **`lua/prr/jj.lua`**: jj (Jujutsu) interaction - fetch, review workspace/change creation, cleanup, changed files, base content (replaces the old `git.lua`)
 
 ## Important Concepts
 
@@ -193,7 +193,7 @@ Fetching: `jj git fetch` only the base branch from `origin` and the head branch 
 
 ### Shell Entry Point (`bin/prr`)
 
-Bash + fzf script: lists PRs (`gh pr list -R <slug>`, review-requested / all, toggle with ctrl-t via fzf `transform`; inside a jj repo that repo's, otherwise every jj repo found under `$PRR_REPO_DIRS`, listed in parallel), `cd`s into the PR's repo, then `nvim --headless -c "lua require('github-pr-reviewer').prepare_pr(N)"` creates the review workspace (`jj.checkout_pr` + `save_session()`, prints the root, `qa!` / `cquit 1`), and the script `cd`s there, reports the cwd with OSC 7 (kitty over SSH) and runs `nvim -c "lua require('github-pr-reviewer').open_pr(N)"` (`_open_review_session` for an existing review, else `_do_start_review`). Calls go through `require` so lazy.nvim loads the plugin and runs `setup`. `prr ls [--all]` lists review workspaces (`find_reviews` + `review_entries_of`: workspaces whose `@` description starts with `pr-review #`); `prr rm [--all]` lists the same and calls `cleanup_reviews()` headless (every non-default review workspace of the repo: `jj.cleanup_review` - `workspace remove`, or `forget` when the directory is gone - plus session delete).
+Bash + fzf script: lists PRs (`gh pr list -R <slug>`, review-requested / all, toggle with ctrl-t via fzf `transform`; inside a jj repo that repo's, otherwise every jj repo found under `$PRR_REPO_DIRS`, listed in parallel), `cd`s into the PR's repo, then `nvim --headless -c "lua require('prr').prepare_pr(N)"` creates the review workspace (`jj.checkout_pr` + `save_session()`, prints the root, `qa!` / `cquit 1`), and the script `cd`s there, reports the cwd with OSC 7 (kitty over SSH) and runs `nvim -c "lua require('prr').open_pr(N)"` (`_open_review_session` for an existing review, else `_do_start_review`). Calls go through `require` so lazy.nvim loads the plugin and runs `setup`. `prr ls [--all]` lists review workspaces (`find_reviews` + `review_entries_of`: workspaces whose `@` description starts with `pr-review #`); `prr rm [--all]` lists the same and calls `cleanup_reviews()` headless (every non-default review workspace of the repo: `jj.cleanup_review` - `workspace remove`, or `forget` when the directory is gone - plus session delete).
 
 `prr context [N]` runs `M.dump_context()` headless: read-only JSON for agents (PR metadata, review change and session state, `jj.pr_commits`, viewed state, comment threads, pending review, conversation, drafts). `skills/prr-review/SKILL.md` is the agent skill built on it (see [The prr-review Skill Stays True](#the-prr-review-skill-stays-true)).
 
@@ -285,8 +285,8 @@ Defined in setup by `define_highlights()` (with `default = true`, re-applied on 
 
 ### 1. Check Current State
 ```lua
-:lua print(vim.inspect(require('github-pr-reviewer')._buffer_changes[vim.api.nvim_get_current_buf()]))
-:lua print(vim.inspect(require('github-pr-reviewer')._buffer_hunks[vim.api.nvim_get_current_buf()]))
+:lua print(vim.inspect(require('prr')._buffer_changes[vim.api.nvim_get_current_buf()]))
+:lua print(vim.inspect(require('prr')._buffer_hunks[vim.api.nvim_get_current_buf()]))
 ```
 
 ### 2. Check What Git Sees
@@ -302,7 +302,7 @@ git diff HEAD       # should be exactly the reviewed changes
 
 ### 4. Reload Plugin
 ```lua
-:luafile lua/github-pr-reviewer/init.lua
+:luafile lua/prr/init.lua
 ```
 
 ## Testing
@@ -421,8 +421,8 @@ git diff HEAD       # should be exactly the reviewed changes
 
 ## Contact and Support
 
-- GitHub Issues: https://github.com/username/neovim-pr-reviewer/issues
-- Documentation: `:h github-pr-reviewer`
+- GitHub Issues: https://github.com/szg251/prr.nvim/issues
+- Documentation: `:h prr`
 
 ---
 
