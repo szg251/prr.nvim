@@ -60,6 +60,7 @@ to review it.
 Using lazy.nvim: >lua
     {
       "szg251/prr.nvim",
+      build = "./install.sh",
       config = function()
         require("prr").setup({
           -- options (see |prr-config|)
@@ -71,11 +72,17 @@ Using lazy.nvim: >lua
 Using packer.nvim: >lua
     use {
       "szg251/prr.nvim",
+      run = "./install.sh",
       config = function()
         require("prr").setup()
       end
     }
 <
+
+`install.sh` symlinks the `prr` shell command (|prr-cli|) into
+`~/.local/bin` and the prr-review agent skill into `~/.claude/skills`
+(override with `$PRR_BIN_DIR` / `$CLAUDE_SKILLS_DIR`). It is safe to
+re-run and never replaces a file that isn't a symlink.
 
 After installation, run `:helptags ALL` to generate help tags.
 

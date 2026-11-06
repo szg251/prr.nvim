@@ -73,6 +73,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 ```lua
 {
   "szg251/prr.nvim",
+  build = "./install.sh", -- links `prr` and the agent skill, see below
   opts = {
     -- options here
   },
@@ -82,6 +83,8 @@ It is a experimental project and may contain bugs. Use at your own risk.
   }
 }
 ```
+
+`install.sh` symlinks the `prr` shell command into `~/.local/bin` and the [agent skill](#bringing-an-agent-into-a-review) into `~/.claude/skills` (override with `PRR_BIN_DIR` / `CLAUDE_SKILLS_DIR`). It is safe to re-run, and never replaces a file that isn't a symlink. With other plugin managers, run it from the plugin's directory (packer: `run = "./install.sh"`, vim-plug: `{ 'do': './install.sh' }`).
 
 ### [packer.nvim](https://github.com/wbthomason/packer.nvim)
 
@@ -329,7 +332,7 @@ Use `:PRListReviewRequests` to see PRs where you've been requested as a reviewer
 
 ### From the Shell: `bin/prr`
 
-`bin/prr` (needs `gh`, `jj` and `fzf`) picks a PR, `cd`s into its review workspace and opens Neovim reviewing it. The terminal's cwd is the review workspace, so e.g. kitty opens new tabs there (over SSH the script reports the cwd to the terminal with OSC 7). Put `bin/` on your `PATH` (or symlink the script).
+`bin/prr` (needs `gh`, `jj` and `fzf`) picks a PR, `cd`s into its review workspace and opens Neovim reviewing it. The terminal's cwd is the review workspace, so e.g. kitty opens new tabs there (over SSH the script reports the cwd to the terminal with OSC 7). `install.sh` links it into `~/.local/bin` (see [Installation](#installation)).
 
 ```sh
 prr                # PRs where your review is requested; ctrl-t toggles to all open PRs
@@ -347,11 +350,7 @@ Inside a jj repo it lists that repo's PRs. Anywhere else it lists the PRs of eve
 
 ### Bringing an Agent into a Review
 
-`skills/prr-review/SKILL.md` is a Claude Code skill (any agent that reads `SKILL.md` files can use it) that lets an agent join a review in progress: it recognises the review workspace, loads everything the plugin knows with `prr context` (PR, threads, pending review, viewed files, commits, commit mode), reads the reviewed code without disturbing the review change, and drafts comments for you to add. Install it by linking it into your skills directory:
-
-```sh
-ln -s "$PWD/skills/prr-review" ~/.claude/skills/prr-review
-```
+`skills/prr-review/SKILL.md` is a Claude Code skill (any agent that reads `SKILL.md` files can use it) that lets an agent join a review in progress: it recognises the review workspace, loads everything the plugin knows with `prr context` (PR, threads, pending review, viewed files, commits, commit mode), reads the reviewed code without disturbing the review change, and drafts comments for you to add. `install.sh` links it into `~/.claude/skills` (see [Installation](#installation)).
 
 Then tell the agent "this is a prr review" from the review workspace.
 
