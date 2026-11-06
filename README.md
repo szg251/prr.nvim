@@ -133,6 +133,9 @@ require("github-pr-reviewer").setup({
   -- Show PR comments as virtual text in buffers
   show_comments = true,
 
+  -- Where the comment count of a commented line goes: "right_align" (window edge) or "eol"
+  comment_indicator_position = "right_align",
+
   -- Show icons/emojis in UI (set to false for a text-only interface)
   show_icons = true,
 

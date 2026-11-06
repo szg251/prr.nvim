@@ -48,6 +48,7 @@ github-pr-reviewer-telescope	github-pr-reviewer.txt	/*github-pr-reviewer-telesco
 github-pr-reviewer-troubleshooting	github-pr-reviewer.txt	/*github-pr-reviewer-troubleshooting*
 github-pr-reviewer-workflows	github-pr-reviewer.txt	/*github-pr-reviewer-workflows*
 github-pr-reviewer.cleanup_reviews()	github-pr-reviewer.txt	/*github-pr-reviewer.cleanup_reviews()*
+github-pr-reviewer.comment_indicator_position	github-pr-reviewer.txt	/*github-pr-reviewer.comment_indicator_position*
 github-pr-reviewer.commit_mode_toggle_key	github-pr-reviewer.txt	/*github-pr-reviewer.commit_mode_toggle_key*
 github-pr-reviewer.mark_as_viewed_key	github-pr-reviewer.txt	/*github-pr-reviewer.mark_as_viewed_key*
 github-pr-reviewer.next_commit_key	github-pr-reviewer.txt	/*github-pr-reviewer.next_commit_key*

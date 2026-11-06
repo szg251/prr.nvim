@@ -11,6 +11,7 @@ M.config = {
   picker = "native",              -- "native", "fzf-lua", "telescope"
   open_files_on_review = true,    -- open modified files after starting review
   show_comments = true,           -- show PR comments in buffers during review
+  comment_indicator_position = "right_align", -- comment count on commented lines: "right_align" (window edge) or "eol"
   show_icons = true,              -- show icons in UI elements
   show_floats = true,             -- show floating windows with info, stats and keymaps
   debug = false,                  -- show debug messages
@@ -2072,10 +2073,7 @@ local function display_comments(bufnr, comments)
 
       -- Create custom highlight group for comment indicator
       local base_hl_name, custom_hl_name
-      if has_local_draft then
-        base_hl_name = "DiagnosticHint"
-        custom_hl_name = "PRCommentDraft"
-      elseif has_pending then
+      if has_pending then
         base_hl_name = "DiagnosticWarn"
         custom_hl_name = "PRCommentPending"
       else
@@ -2098,7 +2096,7 @@ local function display_comments(bufnr, comments)
 
       vim.api.nvim_buf_set_extmark(bufnr, ns_id, line_idx, 0, {
         virt_text = { { text, custom_hl_name } },
-        virt_text_pos = "eol",
+        virt_text_pos = M.config.comment_indicator_position,
       })
     end
   end

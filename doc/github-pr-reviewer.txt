@@ -244,6 +244,7 @@ Configure the plugin by calling the setup function: >lua
 
       -- Show PR comments as virtual text in buffers
       show_comments = true,
+      comment_indicator_position = "right_align", -- or "eol"
 
       -- Show icons/emojis in UI
       show_icons = true,
@@ -305,6 +306,12 @@ open_files_on_review    (boolean, default: true)
                                                      *github-pr-reviewer.show_comments*
 show_comments           (boolean, default: true)
                         Show PR comments as virtual text in buffers.
+
+                                          *github-pr-reviewer.comment_indicator_position*
+comment_indicator_position (string, default: "right_align")
+                        Where the comment count of a commented line is
+                        shown: "right_align" (right edge of the window) or
+                        "eol" (right after the line's text).
 
                                                      *github-pr-reviewer.show_icons*
 show_icons              (boolean, default: true)
