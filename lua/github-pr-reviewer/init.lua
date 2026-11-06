@@ -5889,6 +5889,160 @@ end
 -- Headless: make sure PR pr_number has a review workspace (fetch, create it, save its session),
 -- write its root to stdout and quit. Exits with code 1 (error on stderr) on failure.
 -- Inplace mode creates nothing: the repo root is printed and open_pr() starts the review.
+-- `prr context`: everything an agent needs to join a review, as JSON on stdout (headless only).
+-- Run in a review workspace (the PR is read from its review change) or pass pr_number. Read-only:
+-- GitHub reads plus the session file and `jj log --ignore-working-copy`.
+function M.dump_context(pr_number)
+  local function finish(data, err)
+    if data then
+      io.stdout:write(vim.json.encode(data) .. "\n")
+      vim.cmd("qa!")
+    else
+      io.stderr:write((err or "unknown error") .. "\n")
+      vim.cmd("cquit! 1")
+    end
+  end
+
+  local root = jj.root(vim.fn.getcwd())
+  if not root then
+    return finish(nil, "Not in a jj repository")
+  end
+  jj.cwd = root
+  local change = jj.current_change(root)
+  pr_number = tonumber(pr_number) or jj.current_review_pr(root)
+  if not pr_number then
+    return finish(nil, "Not a review workspace (no 'pr-review #<N>' change at @): pass the PR number")
+  end
+
+  local session = read_session(get_session_file(pr_number)) or {}
+  local function value(v)
+    return v ~= vim.NIL and v or nil
+  end
+
+  local results = {}
+  local remaining = 7
+  local function assemble()
+    -- Pending review comments may also be in the posted comment list: keep them once, as pending
+    local pending_ids = {}
+    for _, c in ipairs(results.pending or {}) do
+      pending_ids[c.id] = true
+    end
+    local threads, by_id = {}, {}
+    for _, c in ipairs(results.comments or {}) do
+      if not pending_ids[c.id] then
+        local entry = {
+          id = c.id,
+          user = c.user,
+          body = c.body,
+          created_at = c.created_at,
+          reactions = #(c.reactions or {}) > 0 and vim.tbl_map(function(r)
+            return r.content .. " by " .. r.user
+          end, c.reactions) or nil,
+        }
+        local parent = by_id[value(c.in_reply_to_id)]
+        if parent then
+          table.insert(parent.replies, entry)
+        else
+          entry.path = c.path
+          entry.line = value(c.line)
+          entry.original_line = value(c.original_line)
+          entry.original_commit = value(c.original_commit_id)
+          entry.outdated = value(c.line) == nil or nil
+          entry.replies = {}
+          by_id[c.id] = entry
+          table.insert(threads, entry)
+        end
+      end
+    end
+
+    local drafts = {}
+    for _, d in pairs((session.drafts or {})[tostring(pr_number)] or (session.drafts or {})[pr_number] or {}) do
+      table.insert(drafts, { path = value(d.file_path), line = value(d.line), action = d.action,
+        comment_id = value(d.comment_id), text = d.text })
+    end
+
+    local pr_head = results.pr and results.pr.headRefOid
+    finish({
+      viewer = results.viewer,
+      pr = results.pr,
+      review = {
+        root = root,
+        change = change and { change_id = change.change_id, parents = change.parents,
+          description = vim.trim(change.description) } or nil,
+        mode = session.mode,
+        merge_base = session.merge_base,
+        head = session.head,
+        commit_mode = session.commit_mode or false,
+        current_commit = session.commit_mode and session.current_commit or nil,
+        session_saved = session.pr_number ~= nil,
+        -- The PR moved on GitHub since the review change was made (refresh with :PRRefresh)
+        stale = (session.head and pr_head and session.head ~= pr_head) or false,
+      },
+      commits = results.commits,
+      files = session.modified_files,
+      viewed = {
+        github = results.viewed,
+        per_commit = session.viewed_commit_files,
+      },
+      threads = threads,
+      pending_review = vim.tbl_map(function(c)
+        return { id = c.id, path = c.path, line = c.line, start_line = c.start_line, body = c.body,
+          outdated = c.line == nil or nil }
+      end, results.pending or {}),
+      conversation = results.conversation,
+      drafts = #drafts > 0 and drafts or nil,
+      errors = results.errors,
+    })
+  end
+  local function done(key, data, err)
+    results[key] = data
+    if err then
+      results.errors = results.errors or {}
+      results.errors[key] = err
+    end
+    remaining = remaining - 1
+    if remaining == 0 then
+      assemble()
+    end
+  end
+
+  vim.system({ "gh", "pr", "view", tostring(pr_number), "--json",
+    "number,url,title,body,author,state,isDraft,headRefName,baseRefName,headRefOid,reviewDecision,additions,deletions,changedFiles" },
+    { text = true, cwd = root }, function(result)
+      vim.schedule(function()
+        local ok, pr = pcall(vim.json.decode, result.stdout or "")
+        done("pr", ok and pr or nil, result.code ~= 0 and vim.trim(result.stderr or "") or nil)
+      end)
+    end)
+  github.fetch_pr_comments(pr_number, function(comments, err)
+    done("comments", comments, err)
+  end)
+  github.get_current_user(function(login, err)
+    done("viewer", login, err)
+  end)
+  github.get_pending_review_comments(pr_number, function(comments, err)
+    done("pending", comments, err)
+  end)
+  github.fetch_pr_global_comments(pr_number, function(comments, err)
+    done("conversation", comments, err)
+  end)
+  github.fetch_viewed_files(pr_number, function(states, err)
+    done("viewed", states, err)
+  end)
+  if session.merge_base and session.head then
+    jj.pr_commits(session.merge_base, session.head, function(commits)
+      done("commits", vim.tbl_map(function(c)
+        return { commit = c.id, change = c.change, subject = c.subject, is_merge = c.is_merge or nil,
+          files = vim.tbl_map(function(f)
+            return f.status .. " " .. f.path
+          end, c.files or {}) }
+      end, commits or {}))
+    end)
+  else
+    done("commits", nil)
+  end
+end
+
 function M.prepare_pr(pr_number)
   pr_number = tonumber(pr_number)
   local function finish(root, err)

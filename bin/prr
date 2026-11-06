@@ -5,6 +5,7 @@
 #   prr                PRs where your review is requested (ctrl-t: all open PRs)
 #   prr --all          start with all open PRs
 #   prr <N>            skip the picker and review PR #N of this repo
+#   prr context [N]    the review's context as JSON (PR, threads, pending review, viewed, commits)
 #   prr clean          remove this repo's review workspaces (directories, review changes, sessions)
 #   prr clean --all    ... of every repo with a review workspace in ~/.prr
 #
@@ -160,6 +161,12 @@ if [[ "${1:-}" == clean ]]; then
   exit
 fi
 
+# prr context [N]: the review's context as JSON (for agents), from inside a review workspace
+if [[ "${1:-}" == context ]]; then
+  [[ -z "${2:-}" || "$2" =~ ^#?[0-9]+$ ]] || die "usage: prr context [<N>]"
+  exec nvim --headless -c "lua require('github-pr-reviewer').dump_context(${2:+${2#\#}})"
+fi
+
 # Inside a jj repo: its PRs (from its default workspace). Anywhere else: the PRs of all local repos.
 default_root=$(repo_root_of "$PWD" 2>/dev/null) || default_root=""
 if [[ -n "$default_root" ]]; then
@@ -200,7 +207,7 @@ case "${1:-}" in
   "") ;;
   --all) view=all ;;
   -h | --help)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   *)
