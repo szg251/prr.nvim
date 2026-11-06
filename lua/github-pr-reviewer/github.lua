@@ -420,13 +420,13 @@ end
 function M.fetch_pr_global_comments(pr_number, callback)
   -- First, fetch issue comments
   local cmd_comments = string.format(
-    "gh api repos/{owner}/{repo}/issues/%d/comments --jq '.[] | {id: .id, body: .body, user: .user.login, created_at: .created_at, type: \"comment\"}'",
+    "gh api --paginate repos/{owner}/{repo}/issues/%d/comments --jq '.[] | {id: .id, body: .body, user: .user.login, created_at: .created_at, type: \"comment\"}'",
     pr_number
   )
 
   -- Also fetch PR reviews (approvals, rejections, etc)
   local cmd_reviews = string.format(
-    "gh api repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | {id: .id, body: .body, user: .user.login, created_at: .submitted_at, state: .state, type: \"review\"}'",
+    "gh api --paginate repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | {id: .id, body: .body, user: .user.login, created_at: .submitted_at, state: .state, type: \"review\"}'",
     pr_number
   )
 
@@ -529,7 +529,7 @@ function M.fetch_pr_comments(pr_number, callback)
   end
 
   local cmd = string.format(
-    "gh api repos/{owner}/{repo}/pulls/%d/comments --jq '.[] | {id: .id, path: .path, line: (.line // .original_line), original_line: .original_line, original_commit_id: .original_commit_id, body: .body, user: .user.login, created_at: .created_at, in_reply_to_id: .in_reply_to_id}'",
+    "gh api --paginate repos/{owner}/{repo}/pulls/%d/comments --jq '.[] | {id: .id, path: .path, line: (.line // .original_line), original_line: .original_line, original_commit_id: .original_commit_id, body: .body, user: .user.login, created_at: .created_at, in_reply_to_id: .in_reply_to_id}'",
     pr_number
   )
 
@@ -1055,7 +1055,7 @@ function M.add_pending_review_comment(pr_number, path, line, body, callback)
 
       -- First, check if there's a pending review (even if empty)
       local get_review_cmd = string.format(
-        "gh api repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | select(.state == \"PENDING\") | .id' | head -n 1",
+        "gh api --paginate repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | select(.state == \"PENDING\") | .id' | head -n 1",
         pr_number
       )
 
@@ -1149,7 +1149,7 @@ end
 -- Get pending review comments
 function M.get_pending_review_comments(pr_number, callback)
   local cmd = string.format(
-    "gh api repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | select(.state == \"PENDING\") | .id'",
+    "gh api --paginate repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | select(.state == \"PENDING\") | .id'",
     pr_number
   )
 
@@ -1189,7 +1189,7 @@ function M.get_pending_review_comments(pr_number, callback)
       for _, review_id in ipairs(review_ids) do
         -- Get all fields to find the absolute line number
         local comments_cmd = string.format(
-          "gh api repos/{owner}/{repo}/pulls/%d/reviews/%d/comments",
+          "gh api --paginate repos/{owner}/{repo}/pulls/%d/reviews/%d/comments --jq '.[]'",
           pr_number,
           review_id
         )
@@ -1198,8 +1198,11 @@ function M.get_pending_review_comments(pr_number, callback)
           stdout_buffered = true,
           on_stdout = function(_, comments_data)
             if comments_data and #comments_data > 0 then
-              local json_str = table.concat(comments_data, "")
-              local ok, comments_array = pcall(vim.fn.json_decode, json_str)
+              -- One comment object per line (--jq '.[]' over every page)
+              local objects = vim.tbl_filter(function(l)
+                return l ~= ""
+              end, comments_data)
+              local ok, comments_array = pcall(vim.fn.json_decode, "[" .. table.concat(objects, ",") .. "]")
 
               if ok and comments_array then
                 for _, comment in ipairs(comments_array) do
@@ -1265,7 +1268,7 @@ end
 function M.get_comment_reactions(comment_id, callback)
   -- PR review comments use /pulls/comments, not /issues/comments
   local cmd = string.format(
-    "gh api repos/{owner}/{repo}/pulls/comments/%d/reactions --jq '.[] | {id: .id, content: .content, user: .user.login}'",
+    "gh api --paginate repos/{owner}/{repo}/pulls/comments/%d/reactions --jq '.[] | {id: .id, content: .content, user: .user.login}'",
     comment_id
   )
 
