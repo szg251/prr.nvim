@@ -6139,6 +6139,9 @@ function M.show_review_menu()
           { key = "c", desc = "Comment on PR",      cmd = function() M.add_comment() end },
           { key = "a", desc = "Approve PR",         cmd = function() M.approve_pr() end },
           { key = "x", desc = "Request Changes",    cmd = function() M.request_changes() end },
+          -- Same as commit_mode_toggle_key: whole PR <-> one commit at a time
+          { key = "t", desc = M._commit_mode and "Review Whole PR" or "Review by Commit",
+            cmd = function() M.toggle_commit_mode() end },
           { key = "e", desc = "Exit Review",        cmd = function() M.cleanup_review_branch() end },
         }
       },
