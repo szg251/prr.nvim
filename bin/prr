@@ -6,8 +6,9 @@
 #   prr --all          start with all open PRs
 #   prr <N>            skip the picker and review PR #N of this repo
 #   prr context [N]    the review's context as JSON (PR, threads, pending review, viewed, commits)
-#   prr clean          remove this repo's review workspaces (directories, review changes, sessions)
-#   prr clean --all    ... of every repo with a review workspace in ~/.prr
+#   prr ls [--all]     list this repo's review workspaces (--all or outside a repo: of every repo)
+#   prr rm             remove this repo's review workspaces (directories, review changes, sessions)
+#   prr rm --all       ... of every repo with a review workspace in ~/.prr
 #
 # Inside a jj repo the PRs of that repo are listed; anywhere else the PRs of every jj repo found
 # up to two levels under $PRR_REPO_DIRS (colon-separated, default: ~/proda:~).
@@ -42,11 +43,6 @@ report_cwd() {
 # Default workspace root of the jj repo that dir belongs to
 repo_root_of() {
   (cd "$1" && workspaces) | awk -F'\t' '$1 == "default" { print $2 }'
-}
-
-# name<TAB>root of the review workspaces (not the default one) of the repo at root
-review_workspaces_of() {
-  (cd "$1" && workspaces) | awk -F'\t' '$1 != "default" && $3 ~ /^pr-review #[0-9]+/ { print $1 "\t" $2 }'
 }
 
 # Comma-separated PR numbers with a review change in the repo at root ("pr-review #<N>: ...")
@@ -93,73 +89,113 @@ list_repo_prs() {
     ] | @tsv'
 }
 
-# prr clean [--all]: remove the review workspaces of this repo (--all: of every repo with one in
-# ~/.prr, plus directories in ~/.prr that are no longer jj workspaces)
-clean() {
-  local repos=() orphans=() dir root
-  if [[ "${1:-}" == --all ]]; then
-    for dir in "$prr_dir"/*/; do
-      [[ -d "$dir" ]] || continue
-      dir=${dir%/}
-      root=$(repo_root_of "$dir" 2>/dev/null) || root=""
-      # Not a workspace jj knows about any more (repo gone, workspace forgotten): just a directory
-      if [[ -z "$root" ]] || ! (cd "$dir" && workspaces) | cut -f2 | grep -qxF "$dir"; then
-        orphans+=("$dir")
-      elif [[ " ${repos[*]} " != *" $root "* ]]; then
-        repos+=("$root")
-      fi
-    done
-  elif [[ -n "${1:-}" ]]; then
-    die "unknown argument: $1"
-  else
-    root=$(repo_root_of "$PWD") && [[ -n "$root" ]] || die "not inside a jj repository (use 'prr clean --all')"
-    repos=("$root")
-  fi
+# PR number<TAB>root<TAB>"<head> -> <base>" of the review workspaces (not the default one) of the
+# repo at root
+review_entries_of() {
+  (cd "$1" && workspaces) | awk -F'\t' '$1 != "default" && match($3, /^pr-review #[0-9]+/) {
+    rest = substr($3, RLENGTH + 1); sub(/^: */, "", rest)
+    print substr($3, 12, RLENGTH - 11) "\t" $2 "\t" rest
+  }'
+}
 
-  local count=0 repo line
-  for repo in "${repos[@]}"; do
-    local entries
-    entries=$(review_workspaces_of "$repo")
+# Find the review workspaces of this repo, or with --all of every repo that has one in ~/.prr.
+# Sets review_repos (their repos' default workspace roots) and orphan_dirs (directories in ~/.prr
+# that are no longer jj workspaces). cmd names the subcommand in errors; outside a jj repo, ls
+# falls back to --all.
+find_reviews() {
+  local cmd=$1 scope=${2:-} dir root
+  review_repos=() orphan_dirs=()
+  if [[ -z "$scope" ]]; then
+    root=$(repo_root_of "$PWD" 2>/dev/null) || root=""
+    if [[ -n "$root" ]]; then
+      review_repos=("$root")
+      return
+    fi
+    [[ "$cmd" == ls ]] || die "not inside a jj repository (use 'prr $cmd --all')"
+  elif [[ "$scope" != --all ]]; then
+    die "unknown argument: $scope"
+  fi
+  for dir in "$prr_dir"/*/; do
+    [[ -d "$dir" ]] || continue
+    dir=${dir%/}
+    root=$(repo_root_of "$dir" 2>/dev/null) || root=""
+    # Not a workspace jj knows about any more (repo gone, workspace forgotten): just a directory
+    if [[ -z "$root" ]] || ! (cd "$dir" && workspaces) | cut -f2 | grep -qxF "$dir"; then
+      orphan_dirs+=("$dir")
+    elif [[ " ${review_repos[*]} " != *" $root "* ]]; then
+      review_repos+=("$root")
+    fi
+  done
+}
+
+# Print the reviews found by find_reviews, grouped by repo; sets review_count
+print_reviews() {
+  local repo pr root desc entries dir
+  review_count=0
+  for repo in "${review_repos[@]}"; do
+    entries=$(review_entries_of "$repo")
     [[ -n "$entries" ]] || continue
     echo "${repo/#$HOME/\~}:"
-    while IFS=$'\t' read -r _ line; do
-      echo "  ${line/#$HOME/\~}"
-      count=$((count + 1))
+    while IFS=$'\t' read -r pr root desc; do
+      printf '  #%-7s %s  (%s)\n' "$pr" "${root/#$HOME/\~}" "$desc"
+      review_count=$((review_count + 1))
     done <<<"$entries"
   done
-  if ((${#orphans[@]})); then
+  if ((${#orphan_dirs[@]})); then
     echo "Not jj workspaces any more (directory only):"
-    for dir in "${orphans[@]}"; do
+    for dir in "${orphan_dirs[@]}"; do
       echo "  ${dir/#$HOME/\~}"
-      count=$((count + 1))
+      review_count=$((review_count + 1))
     done
   fi
-  if ((count == 0)); then
+}
+
+# prr ls [--all]: list the review workspaces of this repo (--all, or outside a jj repo: of every repo
+# with one in ~/.prr)
+list_reviews() {
+  find_reviews ls "$@"
+  print_reviews
+  ((review_count > 0)) || echo "No review workspaces."
+}
+
+# prr rm [--all]: remove the review workspaces of this repo (--all: of every repo with one in
+# ~/.prr, plus directories in ~/.prr that are no longer jj workspaces)
+remove_reviews() {
+  find_reviews rm "$@"
+  print_reviews
+  if ((review_count == 0)); then
     echo "No review workspaces to remove."
     return 0
   fi
 
   local answer
-  read -r -p "Remove these $count review workspace(s) and their directories? [y/N] " answer
+  read -r -p "Remove these $review_count review workspace(s) and their directories? [y/N] " answer
   [[ "$answer" == [yY]* ]] || return 0
 
-  local failed=0
-  for repo in "${repos[@]}"; do
-    [[ -n "$(review_workspaces_of "$repo")" ]] || continue
+  local failed=0 repo dir
+  for repo in "${review_repos[@]}"; do
+    [[ -n "$(review_entries_of "$repo")" ]] || continue
     (cd "$repo" && nvim --headless -c "lua require('github-pr-reviewer').cleanup_reviews()") || failed=1
   done
-  for dir in "${orphans[@]}"; do
+  for dir in "${orphan_dirs[@]}"; do
     rm -rf -- "$dir" && echo "Deleted $dir" || failed=1
   done
   [[ -d "$start_dir" ]] || echo "Your current directory was removed, cd somewhere else." >&2
   return "$failed"
 }
 
-if [[ "${1:-}" == clean ]]; then
-  shift
-  clean "$@"
-  exit
-fi
+case "${1:-}" in
+  ls)
+    shift
+    list_reviews "$@"
+    exit
+    ;;
+  rm)
+    shift
+    remove_reviews "$@"
+    exit
+    ;;
+esac
 
 # prr context [N]: the review's context as JSON (for agents), from inside a review workspace
 if [[ "${1:-}" == context ]]; then
@@ -207,7 +243,7 @@ case "${1:-}" in
   "") ;;
   --all) view=all ;;
   -h | --help)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   *)

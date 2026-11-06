@@ -9,7 +9,7 @@ The user is reviewing someone else's pull request in Neovim with github-pr-revie
 
 ## Steps
 
-1. **Confirm the review workspace.** Run `jj log -r @ --no-graph --ignore-working-copy -T description`. It starts with `pr-review #<N>: <head> -> <base branch>`, where `<head>` is the head branch, or the literal `PR head` once the change has been recreated. If it doesn't, ask the user for the PR number and the review directory.
+1. **Confirm the review workspace.** Run `jj log -r @ --no-graph --ignore-working-copy -T description`. It starts with `pr-review #<N>: <head> -> <base branch>`, where `<head>` is the head branch, or the literal `PR head` once the change has been recreated. If it doesn't, `prr ls` lists the open reviews (PR number, workspace directory) of the repo, or of every repo outside one: ask the user which one, unless there is just one.
 2. **Load the context.** From the review workspace, run `prr context 2>/dev/null` (its stderr is Neovim / shell noise), or `prr context <N>` elsewhere in the repo. When `prr` isn't on `PATH`, it is the plugin repo's `bin/prr`: `"$(readlink -f <skill dir>)/../../bin/prr"`. It prints JSON with everything the plugin knows (see [Context JSON](#context-json)). Reach for direct `gh` calls only for something the dump lacks.
 3. **Orient.** Summarise for the user in a few lines:
    - the PR (title, author, intent from the body)
