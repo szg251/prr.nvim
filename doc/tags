@@ -20,6 +20,7 @@
 :PRReviewComment	github-pr-reviewer.txt	/*:PRReviewComment*
 :PRReviewMenu	github-pr-reviewer.txt	/*:PRReviewMenu*
 :PRReviewSessions	github-pr-reviewer.txt	/*:PRReviewSessions*
+:PRSubmitPendingComments	github-pr-reviewer.txt	/*:PRSubmitPendingComments*
 github-pr-reviewer-arrow	github-pr-reviewer.txt	/*github-pr-reviewer-arrow*
 github-pr-reviewer-cli	github-pr-reviewer.txt	/*github-pr-reviewer-cli*
 github-pr-reviewer-commands	github-pr-reviewer.txt	/*github-pr-reviewer-commands*

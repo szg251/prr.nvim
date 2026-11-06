@@ -179,6 +179,13 @@ COMMENTS~
                         |:PRSubmitPendingComments|, |:PRApprove|,
                         |:PRRequestChanges| or on GitHub.
 
+                                                     *:PRSubmitPendingComments*
+:PRSubmitPendingComments
+                        Submit your pending review as a comment, without
+                        approving or requesting changes ("Submit Review
+                        (Comment)" in the menu). Like GitHub's "Submit
+                        review > Comment".
+
                                                      *:PRListPendingComments*
 :PRListPendingComments  List all pending comments and navigate to the
                         selected one. Shows file path, line number, and

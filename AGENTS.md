@@ -246,7 +246,7 @@ Status "A" (added): base content = empty, every line counts as changed.
 ### Comments
 - `:PRLineComment` - Add line comment (posted right away)
 - `:PRPendingComment` - Pending comment (in the user's GitHub pending review, not published)
-- `:PRSubmitPendingComments` - Publish pending comments
+- `:PRSubmitPendingComments` - Submit the pending review as a comment, without a verdict (menu: "Submit Review (Comment)")
 - `:PREditComment` / `:PRDeleteComment` / `:PRReply` - On the comment at the cursor line
 - `:PRListAllComments` / `:PRListPendingComments` / `:PRGlobalComments` - List comments
 

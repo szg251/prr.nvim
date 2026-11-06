@@ -437,7 +437,8 @@ local function reload_comment_buffers()
 end
 
 -- Add a comment (lines start_line..line, start_line optional) to the pending review on GitHub
-local function add_pending_comment_to_github(bufnr, pr_number, path, line, body, start_line)
+-- restore_draft (optional) keeps the text as a draft when adding fails (see take_draft)
+local function add_pending_comment_to_github(bufnr, pr_number, path, line, body, start_line, restore_draft)
   vim.notify("Adding pending comment...", vim.log.levels.INFO)
   github.add_pending_comment(pr_number, path, line, body, start_line, function(ok, err)
     if ok then
@@ -447,6 +448,9 @@ local function add_pending_comment_to_github(bufnr, pr_number, path, line, body,
       end
     else
       vim.notify("❌ Failed to add pending comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+      if restore_draft then
+        restore_draft()
+      end
     end
   end)
 end
@@ -2503,6 +2507,20 @@ local function clear_draft(pr_number, file_path, line, action, comment_id)
   save_session()
 end
 
+-- A comment window was submitted with text: clear its draft, and return restore_draft(), which saves
+-- the text back as the draft. Callers call it when sending fails, so the text survives (e.g. a
+-- network error) and comes back the next time the same comment window opens.
+local function take_draft(draft_info, pr_number, text)
+  if not (draft_info and pr_number and text ~= "") then
+    return function() end
+  end
+  clear_draft(pr_number, draft_info.file_path, draft_info.line, draft_info.action, draft_info.comment_id)
+  return function()
+    save_draft(pr_number, draft_info.file_path, draft_info.line, draft_info.action, draft_info.comment_id, text)
+    vim.notify("Your text is kept as a draft: open the same comment window again to retry", vim.log.levels.WARN)
+  end
+end
+
 local function input_multiline(prompt, callback, initial_text, draft_info)
   -- draft_info: { pr_number, file_path, line, action, comment_id }
   local pr_number = vim.g.pr_review_number
@@ -2581,21 +2599,12 @@ local function input_multiline(prompt, callback, initial_text, draft_info)
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
     local text = table.concat(lines, "\n")
 
-    -- Clear draft on successful submit
-    if draft_info and pr_number and text ~= "" then
-      clear_draft(
-        pr_number,
-        draft_info.file_path,
-        draft_info.line,
-        draft_info.action,
-        draft_info.comment_id
-      )
-    end
+    local restore_draft = take_draft(draft_info, pr_number, text)
 
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
     if text ~= "" then
-      callback(text)
+      callback(text, restore_draft)
     else
       callback(nil)
     end
@@ -2729,7 +2738,7 @@ function M.approve_pr()
         return
       end
 
-      input_multiline("Approval comment (optional)", function(body)
+      input_multiline("Approval comment (optional)", function(body, restore_draft)
         vim.notify("Approving PR #" .. pr_number .. "...", vim.log.levels.INFO)
         submit_review(pr_number, "APPROVE", body, github.approve_pr, function(ok, err)
           if ok then
@@ -2739,6 +2748,7 @@ function M.approve_pr()
             offer_exit_after_approve(pr_number)
           else
             vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
+            restore_draft()
           end
         end)
       end, nil, {
@@ -2769,7 +2779,7 @@ function M.request_changes()
         return
       end
 
-      input_multiline("Reason for requesting changes (required by GitHub)", function(body)
+      input_multiline("Reason for requesting changes (required by GitHub)", function(body, restore_draft)
         if not body or body:match("^%s*$") then
           vim.notify("❌ Reason is required when requesting changes (GitHub requirement)", vim.log.levels.ERROR)
           return
@@ -2782,6 +2792,7 @@ function M.request_changes()
               vim.log.levels.INFO)
           else
             vim.notify("❌ Failed to request changes: " .. (err or "unknown"), vim.log.levels.ERROR)
+            restore_draft()
           end
         end)
       end, nil, {
@@ -2817,7 +2828,7 @@ function M.submit_pending_comments()
         return
       end
 
-      input_multiline("Optional comment for review (can be empty)", function(body)
+      input_multiline("Optional comment for review (can be empty)", function(body, restore_draft)
         vim.notify(string.format("Submitting %d pending comment(s)...", #pending_comments), vim.log.levels.INFO)
         submit_review(pr_number, "COMMENT", body or "", nil, function(ok, err)
           if ok then
@@ -2825,6 +2836,7 @@ function M.submit_pending_comments()
               vim.log.levels.INFO)
           else
             vim.notify("❌ Failed to submit comments: " .. (err or "unknown"), vim.log.levels.ERROR)
+            restore_draft()
           end
         end)
       end, nil, {
@@ -2844,7 +2856,7 @@ function M.add_comment()
     return
   end
 
-  input_multiline("PR Comment", function(body)
+  input_multiline("PR Comment", function(body, restore_draft)
     if not body then
       return
     end
@@ -2854,6 +2866,7 @@ function M.add_comment()
         vim.notify("✅ Comment added to PR #" .. pr_number, vim.log.levels.INFO)
       else
         vim.notify("❌ Failed to add comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+        restore_draft()
       end
     end)
   end, nil, {
@@ -3086,22 +3099,13 @@ local function input_comment_with_context(target_comment, all_comments, prompt_t
 
     local text = table.concat(comment_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
 
-    -- Clear draft on successful submit
-    if draft_info and pr_number and text ~= "" then
-      clear_draft(
-        pr_number,
-        draft_info.file_path,
-        draft_info.line,
-        draft_info.action,
-        draft_info.comment_id
-      )
-    end
+    local restore_draft = take_draft(draft_info, pr_number, text)
 
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
 
     if text ~= "" then
-      callback(text)
+      callback(text, restore_draft)
     else
       callback(nil)
     end
@@ -3373,22 +3377,13 @@ local function input_reply_with_context(target_comment, all_comments, callback, 
 
     local text = table.concat(reply_lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
 
-    -- Clear draft on successful submit
-    if draft_info and pr_number and text ~= "" then
-      clear_draft(
-        pr_number,
-        draft_info.file_path,
-        draft_info.line,
-        draft_info.action,
-        draft_info.comment_id
-      )
-    end
+    local restore_draft = take_draft(draft_info, pr_number, text)
 
     vim.api.nvim_win_close(win, true)
     vim.cmd("stopinsert")
 
     if text ~= "" then
-      callback(text)
+      callback(text, restore_draft)
     else
       callback(nil)
     end
@@ -3455,7 +3450,7 @@ function M.add_review_comment_with_selection()
   -- Prompt for comment
   input_multiline(
     "Suggested change (edit the code above, line " .. temp_selection.start_line .. "-" .. temp_selection.end_line .. ")",
-    function(body)
+    function(body, restore_draft)
       if not body then
         return
       end
@@ -3467,6 +3462,7 @@ function M.add_review_comment_with_selection()
           M.load_comments_for_buffer(bufnr, true)
         else
           vim.notify("❌ Failed to add suggestion: " .. (err or "unknown"), vim.log.levels.ERROR)
+          restore_draft()
         end
       end, start_line)
     end, suggestion_text, {
@@ -3510,12 +3506,12 @@ function M.add_pending_comment_with_selection()
   -- Prompt for comment
   input_multiline(
     "Pending suggested change (edit the code above, line " ..
-    temp_selection.start_line .. "-" .. temp_selection.end_line .. ")", function(body)
+    temp_selection.start_line .. "-" .. temp_selection.end_line .. ")", function(body, restore_draft)
       if not body then
         return
       end
 
-      add_pending_comment_to_github(bufnr, pr_number, file_path, end_line, body, start_line)
+      add_pending_comment_to_github(bufnr, pr_number, file_path, end_line, body, start_line, restore_draft)
     end, suggestion_text, {
       pr_number = pr_number,
       file_path = file_path,
@@ -3552,7 +3548,7 @@ function M.add_review_comment()
 
   -- Show thread if there are existing comments
   if #line_comments > 0 then
-    input_comment_with_context(line_comments[1], comments, "Add review comment", function(body)
+    input_comment_with_context(line_comments[1], comments, "Add review comment", function(body, restore_draft)
       if not body then
         return
       end
@@ -3563,6 +3559,7 @@ function M.add_review_comment()
           M.load_comments_for_buffer(bufnr, true)
         else
           vim.notify("❌ Failed to add review comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+          restore_draft()
         end
       end)
     end, {
@@ -3574,7 +3571,7 @@ function M.add_review_comment()
     })
   else
     -- No existing comments, just prompt for input
-    input_multiline("Review comment for line " .. cursor_line, function(body)
+    input_multiline("Review comment for line " .. cursor_line, function(body, restore_draft)
       if not body then
         return
       end
@@ -3585,6 +3582,7 @@ function M.add_review_comment()
           M.load_comments_for_buffer(bufnr, true)
         else
           vim.notify("❌ Failed to add review comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+          restore_draft()
         end
       end)
     end, nil, {
@@ -3629,11 +3627,11 @@ function M.add_pending_comment()
 
   -- Show thread if there are existing comments
   if #line_comments > 0 then
-    input_comment_with_context(line_comments[1], comments, "Add pending comment", function(body)
+    input_comment_with_context(line_comments[1], comments, "Add pending comment", function(body, restore_draft)
       if not body then
         return
       end
-      add_pending_comment_to_github(bufnr, pr_number, file_path, cursor_line, body)
+      add_pending_comment_to_github(bufnr, pr_number, file_path, cursor_line, body, nil, restore_draft)
     end, {
       pr_number = pr_number,
       file_path = file_path,
@@ -3643,11 +3641,11 @@ function M.add_pending_comment()
     })
   else
     -- No existing comments, just prompt for input
-    input_multiline("Pending comment for line " .. cursor_line .. " (will be posted with review)", function(body)
+    input_multiline("Pending comment for line " .. cursor_line .. " (will be posted with review)", function(body, restore_draft)
       if not body then
         return
       end
-      add_pending_comment_to_github(bufnr, pr_number, file_path, cursor_line, body)
+      add_pending_comment_to_github(bufnr, pr_number, file_path, cursor_line, body, nil, restore_draft)
     end, nil, {
       pr_number = pr_number,
       file_path = file_path,
@@ -3942,7 +3940,7 @@ function M.list_global_comments()
         local initial_text = table.concat(context_lines, "\n")
 
         -- Reply to the comment using multiline input with context
-        input_multiline("Reply to global comment", function(full_text)
+        input_multiline("Reply to global comment", function(full_text, restore_draft)
           if not full_text or full_text == "" then
             return
           end
@@ -3968,6 +3966,7 @@ function M.list_global_comments()
                 vim.notify("✅ Reply added successfully", vim.log.levels.INFO)
               else
                 vim.notify("❌ Failed to add reply: " .. (add_err or "unknown"), vim.log.levels.ERROR)
+                restore_draft()
               end
             end)
           end
@@ -4027,7 +4026,7 @@ function M.reply_to_comment()
     end
 
     local file_path = get_relative_path(bufnr)
-    input_reply_with_context(comment, comments, function(body)
+    input_reply_with_context(comment, comments, function(body, restore_draft)
       if not body then
         return
       end
@@ -4038,6 +4037,7 @@ function M.reply_to_comment()
           M.load_comments_for_buffer(bufnr, true)
         else
           vim.notify("❌ Failed to reply: " .. (err or "unknown"), vim.log.levels.ERROR)
+          restore_draft()
         end
       end)
     end, {
@@ -4254,6 +4254,7 @@ function M.edit_my_comment()
                   M.load_comments_for_buffer(bufnr, true)
                 else
                   vim.notify("❌ Failed to edit: " .. (edit_err or "unknown"), vim.log.levels.ERROR)
+                  save_draft(pr_number, file_path, cursor_line, "edit", comment.id, text)
                 end
               end)
             else
@@ -4268,6 +4269,7 @@ function M.edit_my_comment()
                   M.load_comments_for_buffer(bufnr, true)
                 else
                   vim.notify("❌ Failed to edit: " .. (edit_err or "unknown"), vim.log.levels.ERROR)
+                  save_draft(pr_number, file_path, cursor_line, "edit", comment.id, text)
                 end
               end)
             end
@@ -5016,7 +5018,7 @@ function M.setup(opts)
 
   vim.api.nvim_create_user_command("PRSubmitPendingComments", function()
     M.submit_pending_comments()
-  end, { desc = "Submit all pending comments as a review (without approving/rejecting)" })
+  end, { desc = "Submit your pending review as a comment (without approving or requesting changes)" })
 
   vim.api.nvim_create_user_command("PRListPendingComments", function()
     M.list_pending_comments()
@@ -6427,7 +6429,7 @@ function M.show_review_menu()
       {
         title = "Comments",
         items = {
-          { key = "s", desc = "Submit Pending Comments", cmd = function() M.submit_pending_comments() end },
+          { key = "s", desc = "Submit Review (Comment)", cmd = function() M.submit_pending_comments() end },
           { key = "v", desc = "List All Comments",       cmd = function() M.list_all_comments() end },
           { key = "g", desc = "Global PR Comments",      cmd = function() M.list_global_comments() end },
         }
