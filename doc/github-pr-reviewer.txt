@@ -260,6 +260,9 @@ Configure the plugin by calling the setup function: >lua
       next_commit_key = "<C-n>",
       prev_commit_key = "<C-p>",
 
+      -- Two-way sync of viewed files with GitHub's "Viewed" checkboxes
+      sync_viewed_with_github = true,
+
       -- Key to go to next modified file
       next_file_key = "<C-l>",
 
@@ -337,6 +340,12 @@ next_commit_key         (string, default: "<C-n>")
 prev_commit_key         (string, default: "<C-p>")
                         Go to the next / previous commit. From PR mode they
                         enter commit mode at the first / last commit.
+
+                                             *github-pr-reviewer.sync_viewed_with_github*
+sync_viewed_with_github (boolean, default: true)
+                        Sync the viewed state of files with GitHub's
+                        "Viewed" checkboxes, both ways. See
+                        |github-pr-reviewer-commit-mode|.
 
                                                      *github-pr-reviewer.next_file_key*
 next_file_key           (string, default: "<C-l>")
@@ -507,6 +516,14 @@ that commit's changes to it, and the file counts as viewed for the whole PR
 once it is viewed in every commit that changes it. Marking a file viewed in PR
 mode marks it in all of its commits. Viewed state is stored per commit SHA, so
 after a force-push the rewritten commits start unviewed.
+
+Viewed state is synced with GitHub (|github-pr-reviewer.sync_viewed_with_github|).
+GitHub's "Viewed" checkbox is per file for the whole PR, so it follows the
+PR-level state: a file is marked viewed on GitHub once it is viewed in every
+commit that changes it, and unmarked as soon as it isn't. When a review starts,
+is restored or refreshed (|:PRRefresh|), the GitHub state wins: files viewed
+there are viewed in all their commits, files not viewed there (unmarked, or
+changed since they were viewed) are unmarked in all of them.
 
 Comments in commit mode: only comments made on that commit are shown, at their
 line in that commit. New single comments are attached to that commit; pending

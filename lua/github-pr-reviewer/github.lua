@@ -1378,4 +1378,112 @@ function M.remove_comment_reaction(comment_id, reaction_id, callback)
   })
 end
 
+-- ===== Viewed files (GitHub's per-file "Viewed" checkbox, per user) =====
+
+M._pr_node_ids = {} -- PR number -> GraphQL node id
+
+local VIEWED_FILES_QUERY = [[
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+      files(first: 100, after: $endCursor) {
+        nodes { path viewerViewedState }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}]]
+
+-- Viewed state of the PR's files for the current user.
+-- callback(states, err), states: path -> "VIEWED" | "UNVIEWED" | "DISMISSED" (viewed, then changed)
+function M.fetch_viewed_files(pr_number, callback)
+  local cmd = { "gh", "api", "graphql", "--paginate",
+    "-F", "owner={owner}", "-F", "repo={repo}", "-F", "number=" .. pr_number,
+    "-f", "query=" .. VIEWED_FILES_QUERY,
+    "--jq", [[.data.repository.pullRequest | "ID\t\(.id)", (.files.nodes[] | "\(.viewerViewedState)\t\(.path)")]] }
+  vim.system(cmd, { text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 then
+        callback(nil, vim.trim(result.stderr or "gh api graphql failed"))
+        return
+      end
+      local states = {}
+      for line in (result.stdout or ""):gmatch("[^\n]+") do
+        local key, value = line:match("^([^\t]+)\t(.+)$")
+        if key == "ID" then
+          M._pr_node_ids[pr_number] = value
+        elseif key then
+          states[value] = key
+        end
+      end
+      callback(states, nil)
+    end)
+  end)
+end
+
+local function get_pr_node_id(pr_number, callback)
+  if M._pr_node_ids[pr_number] then
+    callback(M._pr_node_ids[pr_number])
+    return
+  end
+  vim.system({ "gh", "pr", "view", tostring(pr_number), "--json", "id", "--jq", ".id" }, { text = true }, function(result)
+    vim.schedule(function()
+      local id = result.code == 0 and vim.trim(result.stdout or "") or ""
+      if id == "" then
+        callback(nil, vim.trim(result.stderr or "gh pr view failed"))
+        return
+      end
+      M._pr_node_ids[pr_number] = id
+      callback(id)
+    end)
+  end)
+end
+
+-- Mutations run one at a time, in order, so quick toggles of a file end in its last state
+local viewed_queue, viewed_running = {}, false
+
+local function process_viewed_queue()
+  if viewed_running or #viewed_queue == 0 then
+    return
+  end
+  viewed_running = true
+  local job = table.remove(viewed_queue, 1)
+  local function done(ok, err)
+    viewed_running = false
+    if job.callback then
+      job.callback(ok, err)
+    end
+    process_viewed_queue()
+  end
+  get_pr_node_id(job.pr_number, function(node_id, err)
+    if not node_id then
+      done(false, err)
+      return
+    end
+    local mutation = job.viewed and "markFileAsViewed" or "unmarkFileAsViewed"
+    local query = string.format(
+      "mutation($pr: ID!, $path: String!) { %s(input: {pullRequestId: $pr, path: $path}) { clientMutationId } }",
+      mutation)
+    vim.system({ "gh", "api", "graphql", "-f", "query=" .. query, "-f", "pr=" .. node_id, "-f", "path=" .. job.path },
+      { text = true }, function(result)
+        vim.schedule(function()
+          done(result.code == 0, result.code ~= 0 and vim.trim(result.stderr or "") or nil)
+        end)
+      end)
+  end)
+end
+
+-- Mark (viewed = true) or unmark a file as viewed on GitHub. callback(ok, err)
+function M.set_file_viewed(pr_number, path, viewed, callback)
+  for _, job in ipairs(viewed_queue) do
+    if job.pr_number == pr_number and job.path == path then
+      job.viewed, job.callback = viewed, callback
+      return
+    end
+  end
+  table.insert(viewed_queue, { pr_number = pr_number, path = path, viewed = viewed, callback = callback })
+  process_viewed_queue()
+end
+
 return M

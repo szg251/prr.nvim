@@ -155,6 +155,7 @@ require("github-pr-reviewer").setup({
   commit_mode_toggle_key = "<C-t>",    -- toggle between the whole PR and single commits
   next_commit_key = "<C-n>",           -- next commit (enters commit mode)
   prev_commit_key = "<C-p>",           -- previous commit (enters commit mode)
+  sync_viewed_with_github = true,      -- two-way sync of viewed files with GitHub's "Viewed" checkboxes
 
   -- Key to go to next modified file (only works in review mode)
   next_file_key = "<C-l>",
@@ -401,6 +402,12 @@ enters its commit and opens it, `m` toggles viewed for a file or for a whole com
 it. The file counts as viewed for the whole PR once it is viewed in every commit that changes it.
 Marking a file viewed in PR mode marks it in all of its commits. Viewed state is stored per commit SHA, so
 after a force-push the rewritten commits start unviewed; new commits on top only reset the files they touch.
+
+**Viewed state is synced with GitHub** (`sync_viewed_with_github`). GitHub's "Viewed" checkbox is per file for
+the whole PR, so it follows the PR-level state: a file is marked viewed on GitHub once it is viewed in every
+commit that changes it, and unmarked as soon as it isn't. When a review starts, is restored or refreshed
+(`:PRRefresh`), the GitHub state wins: files viewed there are viewed in all their commits, files not viewed
+there (unmarked, or changed since they were viewed) are unmarked in all of them.
 
 **Comments in commit mode** show only the comments made on that commit, at their line in that commit.
 New single comments are attached to that commit; pending (batched) comments are only available in PR mode,

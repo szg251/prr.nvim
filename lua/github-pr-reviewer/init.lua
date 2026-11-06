@@ -23,6 +23,7 @@ M.config = {
   commit_mode_toggle_key = "<C-t>",    -- toggle between the whole PR (file sidebar) and single commits (commit sidebar)
   next_commit_key = "<C-n>",           -- go to next commit (enters commit mode)
   prev_commit_key = "<C-p>",           -- go to previous commit (enters commit mode)
+  sync_viewed_with_github = true,      -- two-way sync of the viewed state with GitHub's "Viewed" checkboxes
 
   -- Review buffer settings
   review_buffer = {
@@ -226,10 +227,35 @@ local function is_file_viewed(path, commit_id)
   return M._viewed_files[path] or false
 end
 
+-- GitHub's "Viewed" checkbox is per file for the whole PR, so it follows M._viewed_files
+local viewed_sync_seq = 0
+local viewed_pushed_at = {} -- "<pr>:<path>" -> viewed_sync_seq of the last change pushed to GitHub
+
+local function push_viewed(path, viewed)
+  local pr_number = vim.g.pr_review_number
+  if not M.config.sync_viewed_with_github or not pr_number then
+    return
+  end
+  viewed_sync_seq = viewed_sync_seq + 1
+  viewed_pushed_at[pr_number .. ":" .. path] = viewed_sync_seq
+  github.set_file_viewed(pr_number, path, viewed, function(ok, err)
+    if not ok then
+      vim.notify("Failed to sync the viewed state of " .. path .. " to GitHub: " .. (err or "unknown"),
+        vim.log.levels.WARN)
+    end
+  end)
+end
+
 -- Mark a file (un)viewed. In commit mode (or with commit_id) only that commit's changes to the
 -- file are affected; in PR mode the file is (un)marked in every commit that changes it.
-local function set_file_viewed(path, viewed, commit_id)
-  commit_id = commit_id or (current_commit() or {}).id
+-- A change of the file's PR-level viewed state is pushed to GitHub, unless opts.from_github
+-- (which also means PR mode: every commit, whatever the current commit).
+local function set_file_viewed(path, viewed, commit_id, opts)
+  opts = opts or {}
+  if not opts.from_github then
+    commit_id = commit_id or (current_commit() or {}).id
+  end
+  local was_viewed = M._viewed_files[path] == true
   local commits = {}
   if commit_id then
     commits = { commit_id }
@@ -248,6 +274,10 @@ local function set_file_viewed(path, viewed, commit_id)
     sync_pr_viewed(path)
   else
     M._viewed_files[path] = viewed
+  end
+  local now_viewed = M._viewed_files[path] == true
+  if now_viewed ~= was_viewed and not opts.from_github then
+    push_viewed(path, now_viewed)
   end
 end
 
@@ -5259,6 +5289,39 @@ end
 
 -- ===== Commit mode: review the PR one commit at a time =====
 
+-- Take over the viewed state from GitHub: a file viewed there is viewed in every commit that
+-- changes it; a file viewed here but not there (unmarked on GitHub, or DISMISSED because it changed
+-- since) is unmarked in all of them. Files toggled here since the fetch started are left alone.
+local function pull_viewed_from_github()
+  local pr_number = vim.g.pr_review_number
+  if not M.config.sync_viewed_with_github or not pr_number then
+    return
+  end
+  local started = viewed_sync_seq
+  github.fetch_viewed_files(pr_number, function(states, err)
+    if vim.g.pr_review_number ~= pr_number then
+      return
+    end
+    if not states then
+      vim.notify("Failed to fetch the viewed files from GitHub: " .. (err or "unknown"), vim.log.levels.WARN)
+      return
+    end
+    local changed = false
+    for path, state in pairs(states) do
+      local viewed = state == "VIEWED"
+      if (viewed_pushed_at[pr_number .. ":" .. path] or 0) <= started and viewed ~= (M._viewed_files[path] == true) then
+        set_file_viewed(path, viewed, nil, { from_github = true })
+        changed = true
+      end
+    end
+    if changed then
+      save_session()
+      M.refresh_review_buffer()
+      update_changes_float()
+    end
+  end)
+end
+
 -- Load the PR's commits (needed for commit mode and per-commit viewed state)
 load_commits = function(callback)
   if not vim.g.pr_review_merge_base then
@@ -5300,6 +5363,7 @@ load_commits = function(callback)
     end
 
     save_session()
+    pull_viewed_from_github()
     if callback then callback() end
   end)
 end

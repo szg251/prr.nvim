@@ -63,6 +63,7 @@ github-pr-reviewer.review_sessions_delete_key	github-pr-reviewer.txt	/*github-pr
 github-pr-reviewer.show_comments	github-pr-reviewer.txt	/*github-pr-reviewer.show_comments*
 github-pr-reviewer.show_floats	github-pr-reviewer.txt	/*github-pr-reviewer.show_floats*
 github-pr-reviewer.show_icons	github-pr-reviewer.txt	/*github-pr-reviewer.show_icons*
+github-pr-reviewer.sync_viewed_with_github	github-pr-reviewer.txt	/*github-pr-reviewer.sync_viewed_with_github*
 github-pr-reviewer.toggle_floats_key	github-pr-reviewer.txt	/*github-pr-reviewer.toggle_floats_key*
 github-pr-reviewer.txt	github-pr-reviewer.txt	/*github-pr-reviewer.txt*
 github-pr-reviewer.workspace_path	github-pr-reviewer.txt	/*github-pr-reviewer.workspace_path*
