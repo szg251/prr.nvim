@@ -2637,7 +2637,9 @@ local function show_pending_comments_preview(pending_comments, callback)
 
   for i, comment in ipairs(pending_comments) do
     table.insert(lines, string.format("━━━ Comment %d (PENDING) ━━━", i))
-    table.insert(lines, string.format("📄 %s:%d", comment.path, comment.line))
+    -- Outdated comments (their line changed since) have no line
+    table.insert(lines, comment.line and string.format("📄 %s:%d", comment.path, comment.line)
+      or string.format("📄 %s (outdated)", comment.path))
     table.insert(lines, "")
 
     -- Add comment body with wrapping
@@ -3710,8 +3712,13 @@ function M._pick_pending_comment(all_comments)
       vim.cmd("edit " .. vim.fn.fnameescape(review_path(file_path)))
     end
 
-    -- Navigate to the line
-    vim.api.nvim_win_set_cursor(0, { selected_comment.line, 0 })
+    -- Navigate to the line (outdated comments have none: their line changed since)
+    if not selected_comment.line then
+      vim.notify(file_path .. ": the comment is outdated (its line changed), edit or delete it on GitHub",
+        vim.log.levels.WARN)
+      return
+    end
+    vim.api.nvim_win_set_cursor(0, { math.min(selected_comment.line, vim.api.nvim_buf_line_count(0)), 0 })
     vim.cmd("normal! zz")
     vim.notify(string.format("Navigated to %s:%d", file_path, selected_comment.line), vim.log.levels.INFO)
   end)

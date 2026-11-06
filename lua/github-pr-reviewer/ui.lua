@@ -373,7 +373,8 @@ local function format_pending_comment(comment)
   if #comment.body > 60 then
     preview = preview .. "..."
   end
-  return string.format("[%s:%d] %s: %s", comment.path, comment.line, comment.user, preview)
+  local location = comment.line and string.format("%s:%d", comment.path, comment.line) or (comment.path .. " (outdated)")
+  return string.format("[%s] %s: %s", location, comment.user, preview)
 end
 
 local function select_pending_comments_native(comments, callback)
