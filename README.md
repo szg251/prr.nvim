@@ -331,12 +331,12 @@ Use `:PRListReviewRequests` to see PRs where you've been requested as a reviewer
 
 ```sh
 prr                # PRs where your review is requested; ctrl-t toggles to all open PRs
-prr --all          # start with all open PRs
+prr -a, --all      # start with all open PRs
 prr 123            # skip the picker (inside a repo)
 prr context        # the review's context as JSON, for agents (inside a review workspace; or prr context 123)
-prr ls             # list this repo's review workspaces (--all, or outside a repo: of every repo)
+prr ls             # list this repo's review workspaces (-a/--all, or outside a repo: of every repo)
 prr rm             # remove this repo's review workspaces (directories, review changes, sessions)
-prr rm --all       # ... of every repo with a review workspace in ~/.prr, plus leftover directories there
+prr rm -a, --all   # ... of every repo with a review workspace in ~/.prr, plus leftover directories there
 ```
 
 Inside a jj repo it lists that repo's PRs. Anywhere else it lists the PRs of every jj repo found up to two levels under `PRR_REPO_DIRS` (colon-separated, default `~/proda:~`), with a repo column, and `cd`s into the picked PR's repo first.
@@ -749,8 +749,8 @@ jj git remote remove fork-<owner>
 If a review was never cleaned up (e.g. you chose "continue without cleanup"), its workspace stays on disk. List and remove it with:
 
 ```bash
-prr ls             # this repo's review workspaces (prr ls --all: every repo's)
-prr rm             # remove them (prr rm --all: every repo's)
+prr ls             # this repo's review workspaces (prr ls -a: every repo's)
+prr rm             # remove them (prr rm -a: every repo's)
 ```
 
 ### Preview not working in fzf-lua

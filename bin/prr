@@ -3,12 +3,12 @@
 # (github-pr-reviewer.nvim). Needs gh, jj and fzf.
 #
 #   prr                PRs where your review is requested (ctrl-t: all open PRs)
-#   prr --all          start with all open PRs
+#   prr -a, --all      start with all open PRs
 #   prr <N>            skip the picker and review PR #N of this repo
 #   prr context [N]    the review's context as JSON (PR, threads, pending review, viewed, commits)
-#   prr ls [--all]     list this repo's review workspaces (--all or outside a repo: of every repo)
+#   prr ls [-a]        list this repo's review workspaces (-a, --all, or outside a repo: every repo's)
 #   prr rm             remove this repo's review workspaces (directories, review changes, sessions)
-#   prr rm --all       ... of every repo with a review workspace in ~/.prr
+#   prr rm -a, --all   ... of every repo with a review workspace in ~/.prr
 #
 # Inside a jj repo the PRs of that repo are listed; anywhere else the PRs of every jj repo found
 # up to two levels under $PRR_REPO_DIRS (colon-separated, default: ~/proda:~).
@@ -112,7 +112,7 @@ find_reviews() {
       return
     fi
     [[ "$cmd" == ls ]] || die "not inside a jj repository (use 'prr $cmd --all')"
-  elif [[ "$scope" != --all ]]; then
+  elif [[ "$scope" != --all && "$scope" != -a ]]; then
     die "unknown argument: $scope"
   fi
   for dir in "$prr_dir"/*/; do
@@ -241,7 +241,7 @@ slug=""
 view=requested
 case "${1:-}" in
   "") ;;
-  --all) view=all ;;
+  -a | --all) view=all ;;
   -h | --help)
     sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 0

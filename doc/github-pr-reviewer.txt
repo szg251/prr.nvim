@@ -460,9 +460,9 @@ reviewing it. A missing workspace is created first by a headless Neovim.
 Inside a jj repo it lists that repo's PRs; anywhere else the PRs of every
 jj repo up to two levels under `$PRR_REPO_DIRS` (default `~/proda:~`).
 
-`prr ls` lists the review workspaces of the current repo (`--all`, or
+`prr ls` lists the review workspaces of the current repo (`-a`/`--all`, or
 outside a repo: of every repo with a workspace in `~/.prr`). `prr rm`
-removes them (workspace, directory, review change, session); `prr rm --all`
+removes them (workspace, directory, review change, session); `prr rm -a`
 those of every repo with a workspace in `~/.prr`, plus leftover directories
 there.
 
@@ -815,8 +815,8 @@ LEFTOVER REVIEW WORKSPACES~
 
 A review that was never cleaned up leaves its workspace on disk: >bash
 
-    prr ls      # this repo's review workspaces (--all: every repo's)
-    prr rm      # remove them (--all: every repo's)
+    prr ls      # this repo's review workspaces (-a: every repo's)
+    prr rm      # remove them (-a: every repo's)
 <
 
 PREVIEW NOT WORKING IN FZF-LUA~
