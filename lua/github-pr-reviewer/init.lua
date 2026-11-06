@@ -2094,7 +2094,17 @@ local function display_comments(bufnr, comments)
         bg = comment_bg,
       })
 
+      -- Sign in the sign column (left, next to the git signs), so commented lines stand out
+      local sign_text
+      if M.config.show_icons then
+        sign_text = has_pending and "⏳" or "💬"
+      else
+        sign_text = has_pending and "P" or "C"
+      end
+
       vim.api.nvim_buf_set_extmark(bufnr, ns_id, line_idx, 0, {
+        sign_text = sign_text,
+        sign_hl_group = base_hl_name,
         virt_text = { { text, custom_hl_name } },
         virt_text_pos = M.config.comment_indicator_position,
       })

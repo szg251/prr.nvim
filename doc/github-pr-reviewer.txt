@@ -306,6 +306,9 @@ open_files_on_review    (boolean, default: true)
                                                      *github-pr-reviewer.show_comments*
 show_comments           (boolean, default: true)
                         Show PR comments as virtual text in buffers.
+                        Commented lines also get a sign in the sign column
+                        (💬 posted, ⏳ pending; C / P without
+                        |github-pr-reviewer.show_icons|).
 
                                           *github-pr-reviewer.comment_indicator_position*
 comment_indicator_position (string, default: "right_align")
