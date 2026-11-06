@@ -5663,7 +5663,8 @@ function M.refresh_pr_branch()
           github.comment_commit_id = nil
           load_commits(M.refresh_review_buffer)
 
-          -- Clear all cached data
+          -- Clear all cached data (comments are re-fetched from GitHub when the buffer is reloaded)
+          github.clear_cache()
           M._buffer_changes = {}
           M._buffer_hunks = {}
           M._buffer_comments = {}

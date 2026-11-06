@@ -124,6 +124,8 @@ REVIEW WORKFLOW~
                         the new PR head (in the same workspace in
                         workspace mode), abandoning the old one. Local
                         edits made in the review change are discarded.
+                        Comments and viewed files are re-fetched from
+                        GitHub.
 
                                                      *:PRReviewCleanup*
 :PRReviewCleanup        End the current review. In workspace mode, wipes

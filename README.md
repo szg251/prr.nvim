@@ -179,7 +179,7 @@ require("github-pr-reviewer").setup({
 |---------|-------------|
 | `:PRReview` | Select and start reviewing a PR |
 | `:PRListReviewRequests` | List PRs where you are requested as reviewer |
-| `:PRRefresh` | Fetch the latest PR head and recreate the review change for it |
+| `:PRRefresh` | Fetch the latest PR head and recreate the review change for it, re-fetch comments and viewed files |
 | `:PRReviewCleanup` | End review, abandon the review change, remove the review workspace (or return to your previous change) |
 | `:PRInfo` | Show PR information (stats, reviews, merge status) |
 | `:PROpen` | Open PR in browser |
@@ -693,7 +693,7 @@ With vim-fugitive, `:Gvdiffsplit` shows the current file side by side with the d
 
 5. **Change tracking**: Diffs are computed against the merge-base of the PR head and the base branch (`heads(::head & ::base@origin)`) - the same base GitHub's "Files changed" tab uses, so changes that only landed on the base branch don't show up. The file list comes from `jj diff --from <merge-base> --to @` (renames are shown as a delete + an add). Base file content comes from `jj file show -r <merge-base>`, and changed lines are computed with `vim.diff` between that content and the file on disk (used for the sidebar stats, to check that line comments are on changed lines, and to jump to the first change when a file is opened).
 
-6. **Refresh**: `:PRRefresh` re-fetches, recreates the review change for the new PR head (in the same workspace in workspace mode) and abandons the old one. Local edits made in the review change are discarded.
+6. **Refresh**: `:PRRefresh` re-fetches, recreates the review change for the new PR head (in the same workspace in workspace mode) and abandons the old one. Local edits made in the review change are discarded. Comments and viewed files are re-fetched from GitHub.
 
 7. **Cleanup**: Abandons the review change and either removes the review workspace (workspace mode) or goes back to the change you were on (inplace mode).
 
