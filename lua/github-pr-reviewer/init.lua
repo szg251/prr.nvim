@@ -1332,6 +1332,93 @@ local function open_file_from_review(split_type)
   M._opening_file = false
 end
 
+-- ===== Sidebar folds (Vim fold keys): directories in the file sidebar, commits in the commit sidebar =====
+
+local function sidebar_rows(bufnr)
+  local rows = {}
+  for line, item in pairs(vim.b[bufnr].pr_file_map or {}) do
+    if type(item) == "table" then
+      rows[tonumber(line)] = item
+    end
+  end
+  return rows
+end
+
+local function is_fold_item(item)
+  return item.is_directory or item.is_commit
+end
+
+local function fold_key(item)
+  return item.is_directory and ("dir:" .. item.path) or ("commit:" .. item.commit.id)
+end
+
+local function is_folded(item)
+  if item.is_directory then
+    return M._collapsed_dirs[item.path] == true
+  end
+  local expanded = M._expanded_commits[item.commit.id]
+  if expanded == nil then
+    local current = current_commit()
+    expanded = current ~= nil and current.id == item.commit.id
+  end
+  return not expanded
+end
+
+local function set_folded(item, folded)
+  if item.is_directory then
+    M._collapsed_dirs[item.path] = folded or nil
+  else
+    M._expanded_commits[item.commit.id] = not folded
+  end
+end
+
+-- The fold row of the cursor line: the row itself, or the directory / commit it belongs to
+local function fold_row_at_cursor(bufnr)
+  local rows = sidebar_rows(bufnr)
+  for line = vim.api.nvim_win_get_cursor(0)[1], 1, -1 do
+    local item = rows[line]
+    if item and is_fold_item(item) then
+      return item
+    end
+  end
+end
+
+-- Re-render and put the cursor on the row with fold key `key` (when it is still there)
+local function render_keeping_row(bufnr, key)
+  render_review_buffer()
+  if not key then
+    return
+  end
+  for line, item in pairs(sidebar_rows(bufnr)) do
+    if is_fold_item(item) and fold_key(item) == key then
+      vim.api.nvim_win_set_cursor(0, { line, 0 })
+      return
+    end
+  end
+end
+
+-- action: "open" | "close" | "toggle" the fold under the cursor
+local function sidebar_fold(bufnr, action)
+  local item = fold_row_at_cursor(bufnr)
+  if not item then
+    return
+  end
+  local folded = action == "close" or (action == "toggle" and not is_folded(item))
+  set_folded(item, folded)
+  render_keeping_row(bufnr, fold_key(item))
+end
+
+-- Open (folded = false) or close every fold of the sidebar
+local function sidebar_fold_all(bufnr, folded)
+  local cursor_item = fold_row_at_cursor(bufnr)
+  for _, item in pairs(sidebar_rows(bufnr)) do
+    if is_fold_item(item) then
+      set_folded(item, folded)
+    end
+  end
+  render_keeping_row(bufnr, cursor_item and fold_key(cursor_item))
+end
+
 -- Toggle filter
 local function set_review_filter(filter)
   M._review_filter = filter
@@ -1391,6 +1478,18 @@ local function setup_review_buffer_keymaps(bufnr)
       open_file_from_review(nil)
     end
   end, { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = "Open item under the mouse" })
+
+  -- Vim fold keys on directories / commits (on a file row: its directory / commit)
+  local fold_maps = {
+    { "zo", function() sidebar_fold(bufnr, "open") end, "Open fold" },
+    { "zc", function() sidebar_fold(bufnr, "close") end, "Close fold" },
+    { "za", function() sidebar_fold(bufnr, "toggle") end, "Toggle fold" },
+    { "zR", function() sidebar_fold_all(bufnr, false) end, "Open all folds" },
+    { "zM", function() sidebar_fold_all(bufnr, true) end, "Close all folds" },
+  }
+  for _, map in ipairs(fold_maps) do
+    vim.keymap.set("n", map[1], map[2], { buffer = bufnr, silent = true, noremap = true, nowait = true, desc = map[3] })
+  end
 
   vim.keymap.set("n", cfg.open_split_key, function()
     open_file_from_review("split")

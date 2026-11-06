@@ -562,6 +562,8 @@ The review buffer is an interactive file browser showing all changed files:
 • Press <CR> on a file to open it (s / v: split / vertical split);
   double click works too
 • Press m to mark a file viewed
+• Fold directories (commits in commit mode) with |zo| / |zc| / |za| (the row
+  under the cursor, or the one a file belongs to) and |zR| / |zM| (all)
 • Press q to close
 • Automatically refreshes as you mark files viewed
 • The entry under the cursor gets a selection background
