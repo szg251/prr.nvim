@@ -333,6 +333,7 @@ Use `:PRListReviewRequests` to see PRs where you've been requested as a reviewer
 prr                # PRs where your review is requested; ctrl-t toggles to all open PRs
 prr --all          # start with all open PRs
 prr 123            # skip the picker (inside a repo)
+prr context        # the review's context as JSON, for agents (inside a review workspace; or prr context 123)
 prr clean          # remove this repo's review workspaces (directories, review changes, sessions)
 prr clean --all    # ... of every repo with a review workspace in ~/.prr, plus leftover directories there
 ```
@@ -340,6 +341,16 @@ prr clean --all    # ... of every repo with a review workspace in ~/.prr, plus l
 Inside a jj repo it lists that repo's PRs. Anywhere else it lists the PRs of every jj repo found up to two levels under `PRR_REPO_DIRS` (colon-separated, default `~/proda:~`), with a repo column, and `cd`s into the picked PR's repo first.
 
 `●` marks PRs that already have a review in progress. A new review workspace is created first by a headless Neovim (`require("github-pr-reviewer").prepare_pr(N)`), then Neovim is started in it with `require("github-pr-reviewer").open_pr(N)` (which you can also call yourself). In inplace mode Neovim starts in the repo root and creates the review change there.
+
+### Bringing an Agent into a Review
+
+`skills/prr-review/SKILL.md` is a Claude Code skill (any agent that reads `SKILL.md` files can use it) that lets an agent join a review in progress: it recognises the review workspace, loads everything the plugin knows with `prr context` (PR, threads, pending review, viewed files, commits, commit mode), reads the reviewed code without disturbing the review change, and drafts comments for you to add. Install it by linking it into your skills directory:
+
+```sh
+ln -s "$PWD/skills/prr-review" ~/.claude/skills/prr-review
+```
+
+Then tell the agent "this is a prr review" from the review workspace.
 
 ### Review Buffer (Interactive File Browser)
 

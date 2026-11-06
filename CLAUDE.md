@@ -183,6 +183,8 @@ Fetching: `jj git fetch` only the base branch from `origin` and the head branch 
 
 Bash + fzf script: lists PRs (`gh pr list -R <slug>`, review-requested / all, toggle with ctrl-t via fzf `transform`; inside a jj repo that repo's, otherwise every jj repo found under `$PRR_REPO_DIRS`, listed in parallel), `cd`s into the PR's repo, then `nvim --headless -c "lua require('github-pr-reviewer').prepare_pr(N)"` creates the review workspace (`jj.checkout_pr` + `save_session()`, prints the root, `qa!` / `cquit 1`), and the script `cd`s there, reports the cwd with OSC 7 (kitty over SSH) and runs `nvim -c "lua require('github-pr-reviewer').open_pr(N)"` (`_open_review_session` for an existing review, else `_do_start_review`). Calls go through `require` so lazy.nvim loads the plugin and runs `setup`. `prr clean [--all]` calls `cleanup_reviews()` headless (every non-default review workspace of the repo: `jj.cleanup_review` - `workspace remove`, or `forget` when the directory is gone - plus session delete).
 
+`prr context [N]` runs `M.dump_context()` headless: read-only JSON for agents (PR metadata, review change and session state, `jj.pr_commits`, viewed state, comment threads, pending review, conversation, drafts). `skills/prr-review/SKILL.md` is the agent skill built on it: keep it in sync when the review model, commit mode or the JSON change.
+
 ### Diff Base (merge-base)
 
 Diffs are against the merge-base of the PR head and the base branch: `heads(::head & ::base@origin)` (same base as GitHub's "Files changed"; base-only changes don't show). Stored in `vim.g.pr_review_merge_base`.
@@ -222,17 +224,19 @@ Status "A" (added): base content = empty, every line counts as changed.
 ## Available Commands
 
 ### Main
-- `:PR <number>` - Start review
-- `:PRApprove` - Approve PR
-- `:PRReject` - Reject PR
+- `:PR <number>` - Start review (`:PRReview` picks one)
+- `:PRApprove` / `:PRRequestChanges` - Submit the review (with the pending review, if any)
 - `:PRInfo` - Show PR information
-- `:PRMenu` - Interactive menu
+- `:PRReviewMenu` - Interactive menu
+- `:PRRefresh` - Re-fetch the PR and recreate the review change on its new head
+- `:PRReviewCleanup` - Exit the review and clean it up
 
 ### Comments
-- `:PRAddComment` - Add line comment
-- `:PRAddPendingComment` - Pending comment (in the user's GitHub pending review, not published)
+- `:PRLineComment` - Add line comment (posted right away)
+- `:PRPendingComment` - Pending comment (in the user's GitHub pending review, not published)
 - `:PRSubmitPendingComments` - Publish pending comments
-- `:PRListAllComments` - List all comments
+- `:PREditComment` / `:PRDeleteComment` / `:PRReply` - On the comment at the cursor line
+- `:PRListAllComments` / `:PRListPendingComments` / `:PRGlobalComments` - List comments
 
 ### Navigation
 - Keybinds (configurable):
