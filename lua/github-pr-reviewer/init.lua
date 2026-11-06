@@ -60,7 +60,6 @@ M._commit_mode = false       -- reviewing a single commit instead of the whole P
 M._current_commit = nil      -- commit id reviewed in commit mode
 M._expanded_commits = {}     -- commit id -> bool, expansion state in the commit sidebar
 M._collapsed_dirs = {}         -- tracks which directories are collapsed in review buffer
-M._local_pending_comments = {} -- Local storage for pending comments (not synced to GitHub yet)
 M._drafts = {}                 -- Draft comments being edited (auto-saved)
 M._float_win_general = nil     -- General info float (file x/total)
 M._float_win_buffer = nil      -- Buffer info float (hunks, stats, comments)
@@ -392,7 +391,6 @@ local function save_session()
     head = vim.g.pr_review_head,
     commit_mode = M._commit_mode,
     current_commit = M._current_commit,
-    pending_comments = M._local_pending_comments,
     drafts = M._drafts,
     cwd = vim.fn.getcwd(),
     repo_id = jj.repo_id(),
@@ -425,67 +423,64 @@ end
 local get_inline_diff
 local load_commits
 
--- Local pending comments management (stored locally, not on GitHub)
-local function generate_local_comment_id()
-  return "local_" .. os.time() .. "_" .. math.random(10000, 99999)
-end
+-- Pending comments live in the user's pending review on GitHub (visible there as "Pending",
+-- submittable from either side)
 
-local function get_local_pending_comments_for_pr(pr_number)
-  return M._local_pending_comments[pr_number] or {}
-end
-
-local function add_local_pending_comment(pr_number, path, line, body, user, start_line)
-  if not M._local_pending_comments[pr_number] then
-    M._local_pending_comments[pr_number] = {}
-  end
-
-  local comment = {
-    id = generate_local_comment_id(),
-    path = path,
-    line = line,
-    body = body,
-    user = user,
-    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-    is_pending = true,
-    is_local = true,
-    reactions = {},
-  }
-
-  -- Add start_line for multi-line suggestions
-  if start_line and start_line ~= line then
-    comment.start_line = start_line
-  end
-
-  table.insert(M._local_pending_comments[pr_number], comment)
-  return comment
-end
-
-local function remove_local_pending_comment(pr_number, comment_id)
-  if not M._local_pending_comments[pr_number] then
-    return false
-  end
-
-  for i, comment in ipairs(M._local_pending_comments[pr_number]) do
-    if comment.id == comment_id then
-      table.remove(M._local_pending_comments[pr_number], i)
-      return true
+-- Reload the comments of every buffer that shows some (after a review was submitted)
+local function reload_comment_buffers()
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_valid(buf) and M._buffer_comments[buf] then
+      M.load_comments_for_buffer(buf, true)
     end
   end
-
-  return false
 end
 
-local function get_local_pending_comments_for_file(pr_number, file_path)
-  local all_comments = get_local_pending_comments_for_pr(pr_number)
-  local file_comments = {}
+-- Add a comment (lines start_line..line, start_line optional) to the pending review on GitHub
+local function add_pending_comment_to_github(bufnr, pr_number, path, line, body, start_line)
+  vim.notify("Adding pending comment...", vim.log.levels.INFO)
+  github.add_pending_comment(pr_number, path, line, body, start_line, function(ok, err)
+    if ok then
+      vim.notify("✅ Pending comment added to your pending review on GitHub", vim.log.levels.INFO)
+      if vim.api.nvim_buf_is_valid(bufnr) then
+        M.load_comments_for_buffer(bufnr, true)
+      end
+    else
+      vim.notify("❌ Failed to add pending comment: " .. (err or "unknown"), vim.log.levels.ERROR)
+    end
+  end)
+end
 
-  for _, comment in ipairs(all_comments) do
-    if comment.path == file_path then
-      table.insert(file_comments, comment)
+-- Pending comments that older versions kept in the session file: move them to the pending review
+local function migrate_local_pending_comments(pending_by_pr)
+  for pr_number, comments in pairs(pending_by_pr or {}) do
+    pr_number = tonumber(pr_number)
+    for _, c in ipairs(type(comments) == "table" and comments or {}) do
+      local body = (c.body or ""):gsub("\n<!%-%- PR_RANGE:%d+%-%d+ %-%->", "")
+      github.add_pending_comment(pr_number, c.path, c.line, body, c.start_line, function(ok, err)
+        if ok then
+          vim.notify(string.format("Moved pending comment on %s:%d to GitHub", c.path, c.line), vim.log.levels.INFO)
+        else
+          vim.notify(string.format("❌ Failed to move pending comment on %s:%d to GitHub (%s):\n%s",
+            c.path, c.line, err or "unknown", body), vim.log.levels.ERROR)
+        end
+      end)
     end
   end
+end
 
-  return file_comments
+-- Submit the pending review on GitHub with event; without a pending review, fallback(pr_number,
+-- body, callback) sends a plain review. callback(ok, err)
+local function submit_review(pr_number, event, body, fallback, callback)
+  github.submit_pending_review(pr_number, event, body, function(ok, err, submitted)
+    if submitted then
+      reload_comment_buffers()
+    end
+    if not ok or submitted or not fallback then
+      callback(ok, err)
+      return
+    end
+    fallback(pr_number, body, callback)
+  end)
 end
 
 -- Check if a line is part of the diff (can receive comments)
@@ -2038,16 +2033,11 @@ local function display_comments(bufnr, comments)
     if line_idx < line_count then
       local count = count_comments_at_line(comments, line)
 
-      -- Check if any comment on this line is a local draft or pending
-      local has_local_draft = false
+      -- Check if any comment on this line is part of the pending review
       local has_pending = false
       for _, c in ipairs(comments) do
-        if c.line == line then
-          if c.is_local then
-            has_local_draft = true
-          elseif c.is_pending then
-            has_pending = true
-          end
+        if c.line == line and c.is_pending then
+          has_pending = true
         end
       end
 
@@ -2055,17 +2045,13 @@ local function display_comments(bufnr, comments)
 
       local text
       if M.config.show_icons then
-        if has_local_draft then
-          text = count > 1 and string.format(" 📝 %d comments (draft)", count) or " 📝 1 comment (draft)"
-        elseif has_pending then
+        if has_pending then
           text = count > 1 and string.format(" ⏳ %d comments (pending)", count) or " ⏳ 1 comment (pending)"
         else
           text = count > 1 and string.format(" 💬 %d comments", count) or " 💬 1 comment"
         end
       else
-        if has_local_draft then
-          text = count > 1 and string.format(" [%d comments (draft)]", count) or " [1 comment (draft)]"
-        elseif has_pending then
+        if has_pending then
           text = count > 1 and string.format(" [%d comments (pending)]", count) or " [1 comment (pending)]"
         else
           text = count > 1 and string.format(" [%d comments]", count) or " [1 comment]"
@@ -2244,7 +2230,7 @@ function M.add_reaction_to_comment()
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1]
   local line_comments = {}
   for _, comment in ipairs(comments) do
-    if comment.line == cursor_line and not comment.is_pending and not comment.is_local then
+    if comment.line == cursor_line and not comment.is_pending then
       table.insert(line_comments, comment)
     end
   end
@@ -2343,33 +2329,21 @@ function M.load_comments_for_buffer(bufnr, force_reload)
       return
     end
 
-    -- Also get pending comments and merge them
+    -- Also get the comments of the pending review and merge them
     github.get_pending_review_comments(pr_number, function(pending_comments, pending_err)
-      debug_log(string.format("Debug load: Got %d pending comments, err=%s", #(pending_comments or {}),
-        pending_err or "nil"))
-
       if not pending_err and pending_comments then
-        -- Filter pending comments for this file and mark them as pending
-        local added_count = 0
+        local pending_ids = {}
         for _, pc in ipairs(pending_comments) do
-          debug_log(string.format("Debug load: Pending comment path=%s, file_path=%s, line=%s", pc.path or "nil",
-            file_path, tostring(pc.line)))
+          pending_ids[pc.id] = true
+        end
+        comments = vim.tbl_filter(function(c)
+          return not pending_ids[c.id]
+        end, comments)
+        for _, pc in ipairs(pending_comments) do
           if pc.path == file_path then
-            pc.is_pending = true
-            pc.body = pc.body .. " (pending)"
             table.insert(comments, pc)
-            added_count = added_count + 1
           end
         end
-        debug_log(string.format("Debug load: Added %d pending comments to buffer", added_count))
-      end
-
-      -- Also merge local pending comments
-      local local_pending = get_local_pending_comments_for_file(pr_number, file_path)
-      debug_log(string.format("Debug load: Got %d local pending comments for file", #local_pending))
-      for _, lpc in ipairs(local_pending) do
-        -- Local pending comments already have is_pending and is_local set
-        table.insert(comments, lpc)
       end
 
       show(comments)
@@ -2635,58 +2609,36 @@ function M.approve_pr()
     return
   end
 
-  -- Get local pending comments
-  local pending_comments = get_local_pending_comments_for_pr(pr_number)
-
-  -- Show preview if there are pending comments
-  show_pending_comments_preview(pending_comments, function(proceed)
-    if not proceed then
-      vim.notify("Approval cancelled", vim.log.levels.INFO)
+  github.get_pending_review_comments(pr_number, function(pending_comments, pending_err)
+    if pending_err then
+      vim.notify("❌ Failed to fetch pending comments: " .. pending_err, vim.log.levels.ERROR)
       return
     end
+    show_pending_comments_preview(pending_comments, function(proceed)
+      if not proceed then
+        vim.notify("Approval cancelled", vim.log.levels.INFO)
+        return
+      end
 
-    input_multiline("Approval comment (optional)", function(body)
-      vim.notify("Approving PR #" .. pr_number .. "...", vim.log.levels.INFO)
-
-      -- If there are pending comments, submit review with comments using API
-      if pending_comments and #pending_comments > 0 then
-        github.submit_review_with_comments(pr_number, "APPROVE", body, pending_comments, function(ok, err)
+      input_multiline("Approval comment (optional)", function(body)
+        vim.notify("Approving PR #" .. pr_number .. "...", vim.log.levels.INFO)
+        submit_review(pr_number, "APPROVE", body, github.approve_pr, function(ok, err)
           if ok then
-            -- Clear local pending comments after successful submission
-            M._local_pending_comments[pr_number] = nil
-            save_session()
-
-            -- Reload all open buffers to remove PENDING markers
-            for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-              if vim.api.nvim_buf_is_valid(buf) and M._buffer_comments[buf] then
-                M.load_comments_for_buffer(buf, true)
-              end
-            end
-
-            vim.notify(string.format("✅ PR #%d approved with %d comments!", pr_number, #pending_comments),
+            vim.notify(string.format("✅ PR #%d approved%s", pr_number,
+              #pending_comments > 0 and string.format(" with %d comments!", #pending_comments) or "!"),
               vim.log.levels.INFO)
             offer_exit_after_approve(pr_number)
           else
             vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
         end)
-      else
-        -- No pending comments, use simple approve
-        github.approve_pr(pr_number, body, function(ok, err)
-          if ok then
-            vim.notify("✅ PR #" .. pr_number .. " approved!", vim.log.levels.INFO)
-            offer_exit_after_approve(pr_number)
-          else
-            vim.notify("❌ Failed to approve: " .. (err or "unknown"), vim.log.levels.ERROR)
-          end
-        end)
-      end
-    end, nil, {
-      pr_number = pr_number,
-      file_path = nil,
-      line = nil,
-      action = "approve_pr",
-    })
+      end, nil, {
+        pr_number = pr_number,
+        file_path = nil,
+        line = nil,
+        action = "approve_pr",
+      })
+    end)
   end)
 end
 
@@ -2697,60 +2649,39 @@ function M.request_changes()
     return
   end
 
-  -- Get local pending comments
-  local pending_comments = get_local_pending_comments_for_pr(pr_number)
-
-  -- Show preview if there are pending comments
-  show_pending_comments_preview(pending_comments, function(proceed)
-    if not proceed then
-      vim.notify("Request changes cancelled", vim.log.levels.INFO)
+  github.get_pending_review_comments(pr_number, function(pending_comments, pending_err)
+    if pending_err then
+      vim.notify("❌ Failed to fetch pending comments: " .. pending_err, vim.log.levels.ERROR)
       return
     end
-
-    input_multiline("Reason for requesting changes (required by GitHub)", function(body)
-      if not body or body:match("^%s*$") then
-        vim.notify("❌ Reason is required when requesting changes (GitHub requirement)", vim.log.levels.ERROR)
+    show_pending_comments_preview(pending_comments, function(proceed)
+      if not proceed then
+        vim.notify("Request changes cancelled", vim.log.levels.INFO)
         return
       end
-      vim.notify("Requesting changes on PR #" .. pr_number .. "...", vim.log.levels.INFO)
 
-      -- If there are pending comments, submit review with comments using API
-      if pending_comments and #pending_comments > 0 then
-        github.submit_review_with_comments(pr_number, "REQUEST_CHANGES", body, pending_comments, function(ok, err)
+      input_multiline("Reason for requesting changes (required by GitHub)", function(body)
+        if not body or body:match("^%s*$") then
+          vim.notify("❌ Reason is required when requesting changes (GitHub requirement)", vim.log.levels.ERROR)
+          return
+        end
+        vim.notify("Requesting changes on PR #" .. pr_number .. "...", vim.log.levels.INFO)
+        submit_review(pr_number, "REQUEST_CHANGES", body, github.request_changes, function(ok, err)
           if ok then
-            -- Clear local pending comments after successful submission
-            M._local_pending_comments[pr_number] = nil
-            save_session()
-
-            -- Reload all open buffers to remove PENDING markers
-            for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-              if vim.api.nvim_buf_is_valid(buf) and M._buffer_comments[buf] then
-                M.load_comments_for_buffer(buf, true)
-              end
-            end
-
-            vim.notify(string.format("✅ Requested changes on PR #%d with %d comments", pr_number, #pending_comments),
+            vim.notify(string.format("✅ Requested changes on PR #%d%s", pr_number,
+              #pending_comments > 0 and string.format(" with %d comments", #pending_comments) or ""),
               vim.log.levels.INFO)
           else
             vim.notify("❌ Failed to request changes: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
         end)
-      else
-        -- No pending comments, use simple request changes
-        github.request_changes(pr_number, body, function(ok, err)
-          if ok then
-            vim.notify("✅ Requested changes on PR #" .. pr_number, vim.log.levels.INFO)
-          else
-            vim.notify("❌ Failed to request changes: " .. (err or "unknown"), vim.log.levels.ERROR)
-          end
-        end)
-      end
-    end, nil, {
-      pr_number = pr_number,
-      file_path = nil,
-      line = nil,
-      action = "request_changes",
-    })
+      end, nil, {
+        pr_number = pr_number,
+        file_path = nil,
+        line = nil,
+        action = "request_changes",
+      })
+    end)
   end)
 end
 
@@ -2761,50 +2692,39 @@ function M.submit_pending_comments()
     return
   end
 
-  -- Get local pending comments
-  local pending_comments = get_local_pending_comments_for_pr(pr_number)
-
-  if not pending_comments or #pending_comments == 0 then
-    vim.notify("No pending comments to submit", vim.log.levels.INFO)
-    return
-  end
-
-  -- Show preview of pending comments
-  show_pending_comments_preview(pending_comments, function(proceed)
-    if not proceed then
-      vim.notify("Submission cancelled", vim.log.levels.INFO)
+  github.get_pending_review_comments(pr_number, function(pending_comments, pending_err)
+    if pending_err then
+      vim.notify("❌ Failed to fetch pending comments: " .. pending_err, vim.log.levels.ERROR)
+      return
+    end
+    if #pending_comments == 0 then
+      vim.notify("No pending comments to submit", vim.log.levels.INFO)
       return
     end
 
-    input_multiline("Optional comment for review (can be empty)", function(body)
-      vim.notify(string.format("Submitting %d pending comment(s)...", #pending_comments), vim.log.levels.INFO)
+    show_pending_comments_preview(pending_comments, function(proceed)
+      if not proceed then
+        vim.notify("Submission cancelled", vim.log.levels.INFO)
+        return
+      end
 
-      -- Submit review with COMMENT event (not APPROVE or REQUEST_CHANGES)
-      github.submit_review_with_comments(pr_number, "COMMENT", body or "", pending_comments, function(ok, err)
-        if ok then
-          -- Clear local pending comments after successful submission
-          M._local_pending_comments[pr_number] = nil
-          save_session()
-
-          -- Reload all open buffers to remove PENDING markers
-          for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-            if vim.api.nvim_buf_is_valid(buf) and M._buffer_comments[buf] then
-              M.load_comments_for_buffer(buf, true)
-            end
+      input_multiline("Optional comment for review (can be empty)", function(body)
+        vim.notify(string.format("Submitting %d pending comment(s)...", #pending_comments), vim.log.levels.INFO)
+        submit_review(pr_number, "COMMENT", body or "", nil, function(ok, err)
+          if ok then
+            vim.notify(string.format("✅ Submitted %d comment(s) successfully!", #pending_comments),
+              vim.log.levels.INFO)
+          else
+            vim.notify("❌ Failed to submit comments: " .. (err or "unknown"), vim.log.levels.ERROR)
           end
-
-          vim.notify(string.format("✅ Submitted %d comment(s) successfully!", #pending_comments),
-            vim.log.levels.INFO)
-        else
-          vim.notify("❌ Failed to submit comments: " .. (err or "unknown"), vim.log.levels.ERROR)
-        end
-      end)
-    end, nil, {
-      pr_number = pr_number,
-      file_path = nil,
-      line = nil,
-      action = "submit_pending",
-    })
+        end)
+      end, nil, {
+        pr_number = pr_number,
+        file_path = nil,
+        line = nil,
+        action = "submit_pending",
+      })
+    end)
   end)
 end
 
@@ -2967,7 +2887,7 @@ local function input_comment_with_context(target_comment, all_comments, prompt_t
     end
 
     -- Add pending indicator if it's a local pending comment
-    local pending_mark = (item.comment.is_pending and item.comment.is_local) and " [PENDING]" or ""
+    local pending_mark = item.comment.is_pending and " [PENDING]" or ""
 
     table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. pending_mark .. ":")
 
@@ -3147,7 +3067,7 @@ local function show_reply_thread(target_comment, all_comments, callback)
     end
 
     -- Add pending indicator if it's a local pending comment
-    local pending_mark = (item.comment.is_pending and item.comment.is_local) and " [PENDING]" or ""
+    local pending_mark = item.comment.is_pending and " [PENDING]" or ""
 
     table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. pending_mark .. ":")
 
@@ -3486,24 +3406,7 @@ function M.add_pending_comment_with_selection()
         return
       end
 
-      -- Get current user
-      github.get_current_user(function(user, err)
-        local username = user or "me"
-
-        -- Store the range info in the comment body for later use
-        local comment_with_range = body .. "\n<!-- PR_RANGE:" .. start_line .. "-" .. end_line .. " -->"
-
-        -- Add comment to local storage
-        add_local_pending_comment(pr_number, file_path, end_line, comment_with_range, username, start_line)
-
-        -- Save session to persist pending comments
-        save_session()
-
-        vim.notify("✅ Pending suggestion added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
-
-        -- Reload comments to show the new pending comment
-        M.load_comments_for_buffer(bufnr, false)
-      end)
+      add_pending_comment_to_github(bufnr, pr_number, file_path, end_line, body, start_line)
     end, suggestion_text, {
       pr_number = pr_number,
       file_path = file_path,
@@ -3621,21 +3524,7 @@ function M.add_pending_comment()
       if not body then
         return
       end
-      -- Get current user
-      github.get_current_user(function(user, err)
-        local username = user or "me"
-
-        -- Add comment to local storage
-        local comment = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
-
-        -- Save session to persist pending comments
-        save_session()
-
-        vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
-
-        -- Reload comments to show the new pending comment
-        M.load_comments_for_buffer(bufnr, false)
-      end)
+      add_pending_comment_to_github(bufnr, pr_number, file_path, cursor_line, body)
     end, {
       pr_number = pr_number,
       file_path = file_path,
@@ -3649,21 +3538,7 @@ function M.add_pending_comment()
       if not body then
         return
       end
-      -- Get current user
-      github.get_current_user(function(user, err)
-        local username = user or "me"
-
-        -- Add comment to local storage
-        local comment = add_local_pending_comment(pr_number, file_path, cursor_line, body, username)
-
-        -- Save session to persist pending comments
-        save_session()
-
-        vim.notify("✅ Pending comment added locally (will be posted with approval/rejection)", vim.log.levels.INFO)
-
-        -- Reload comments to show the new pending comment
-        M.load_comments_for_buffer(bufnr, false)
-      end)
+      add_pending_comment_to_github(bufnr, pr_number, file_path, cursor_line, body)
     end, nil, {
       pr_number = pr_number,
       file_path = file_path,
@@ -3675,14 +3550,22 @@ function M.add_pending_comment()
 end
 
 function M.list_pending_comments()
-  -- Collect all pending comments from all PRs
-  local all_comments = {}
-  for pr_number, comments in pairs(M._local_pending_comments) do
-    for _, comment in ipairs(comments) do
-      table.insert(all_comments, comment)
-    end
+  local pr_number = vim.g.pr_review_number
+  if not pr_number then
+    vim.notify("Not in review mode", vim.log.levels.WARN)
+    return
   end
+  github.get_pending_review_comments(pr_number, function(comments, err)
+    if err then
+      vim.notify("Failed to fetch pending comments: " .. err, vim.log.levels.ERROR)
+      return
+    end
+    M._pick_pending_comment(comments)
+  end)
+end
 
+-- Picker over the pending review's comments, jumping to the selected one
+function M._pick_pending_comment(all_comments)
   if #all_comments == 0 then
     vim.notify("No pending comments", vim.log.levels.INFO)
     return
@@ -3734,7 +3617,8 @@ function M.list_all_comments()
     return
   end
 
-  -- Fetch ALL comments from GitHub API (not just cached ones)
+  -- Fetch ALL comments from GitHub API (not just cached ones), and the pending review's
+  github.get_pending_review_comments(pr_number, function(pending_comments)
   github.fetch_pr_comments(pr_number, function(github_comments, err)
     if err then
       vim.notify("Failed to fetch PR comments: " .. err, vim.log.levels.ERROR)
@@ -3743,10 +3627,15 @@ function M.list_all_comments()
 
     local all_comments = {}
 
-    -- Add all GitHub comments
+    local pending_ids = {}
+    for _, pc in ipairs(pending_comments or {}) do
+      pending_ids[pc.id] = true
+    end
+
+    -- Add all GitHub comments (the pending review's ones once, as pending)
     for _, comment in ipairs(github_comments or {}) do
       -- Skip comments without line number (those are review-level comments)
-      if comment.line then
+      if comment.line and not pending_ids[comment.id] then
         table.insert(all_comments, {
           id = comment.id,
           path = comment.path,
@@ -3754,29 +3643,13 @@ function M.list_all_comments()
           user = comment.user,
           body = comment.body,
           created_at = comment.created_at,
-          is_local = false,
+          is_pending = false,
           bufnr = nil,
         })
       end
     end
-
-    -- Add local pending comments (but check for duplicates)
-    local pending_comments = get_local_pending_comments_for_pr(pr_number)
-    for _, pending in ipairs(pending_comments) do
-      -- Check if this comment already exists in GitHub comments
-      local is_duplicate = false
-      for _, posted in ipairs(all_comments) do
-        if posted.path == pending.path and
-            posted.line == pending.line and
-            posted.body == pending.body and
-            not posted.is_local then
-          is_duplicate = true
-          break
-        end
-      end
-
-      -- Only add if not a duplicate
-      if not is_duplicate then
+    for _, pending in ipairs(pending_comments or {}) do
+      if pending.line then
         table.insert(all_comments, {
           id = pending.id,
           path = pending.path,
@@ -3784,7 +3657,7 @@ function M.list_all_comments()
           user = "You (PENDING)",
           body = pending.body,
           created_at = pending.created_at,
-          is_local = true,
+          is_pending = true,
           bufnr = nil,
         })
       end
@@ -3848,12 +3721,13 @@ function M.list_all_comments()
       vim.cmd("normal! zz")
 
       -- Show notification with comment info
-      local status = selected_comment.is_local and "PENDING" or "Posted"
+      local status = selected_comment.is_pending and "PENDING" or "Posted"
       vim.notify(
         string.format("[%s] %s:%d - %s", status, file_path, selected_comment.line, selected_comment.user),
         vim.log.levels.INFO
       )
     end)
+  end)
   end)
 end
 
@@ -4033,7 +3907,7 @@ function M.reply_to_comment()
 
   local function do_reply(comment)
     -- Check if it's a pending comment
-    if comment.is_local then
+    if comment.is_pending then
       vim.notify("❌ Cannot reply to pending comments. Submit the review first.", vim.log.levels.WARN)
       return
     end
@@ -4129,7 +4003,7 @@ function M.edit_my_comment()
         local has_draft = M._drafts[pr_number] and M._drafts[pr_number][draft_key]
 
         -- Set title based on comment type
-        local title = comment.is_local
+        local title = comment.is_pending
             and " Edit PENDING comment (save: <C-s>, cancel: <Esc>) "
             or " Edit comment (save: <C-s>, cancel: <Esc>) "
 
@@ -4169,7 +4043,7 @@ function M.edit_my_comment()
               date = " (" .. date:sub(1, 10) .. ")"
             end
 
-            local pending_mark = (item.comment.is_pending and item.comment.is_local) and " [PENDING]" or ""
+            local pending_mark = item.comment.is_pending and " [PENDING]" or ""
             table.insert(lines, indent .. prefix .. "**" .. item.comment.user .. "**" .. date .. pending_mark .. ":")
 
             local wrapped = wrap_text(item.comment.body, width - 4, indent)
@@ -4256,30 +4130,18 @@ function M.edit_my_comment()
           vim.api.nvim_win_close(win, true)
           vim.cmd("stopinsert")
           if text ~= "" then
-            -- Check if it's a local pending comment
-            if comment.is_local then
-              vim.notify("Updating local pending comment...", vim.log.levels.INFO)
-
-              -- Find and update the comment in local storage
-              local pending_comments = M._local_pending_comments[pr_number]
-              if pending_comments then
-                for _, pc in ipairs(pending_comments) do
-                  if pc.id == comment.id then
-                    pc.body = text
-                    pc.created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") -- Update timestamp
-                    break
-                  end
+            -- A comment of the pending review (edited by its GraphQL node id)
+            if comment.is_pending then
+              vim.notify("Updating pending comment...", vim.log.levels.INFO)
+              github.edit_pending_comment(comment.node_id, text, function(ok, edit_err)
+                if ok then
+                  clear_draft(pr_number, file_path, cursor_line, "edit", comment.id)
+                  vim.notify("✅ Pending comment updated", vim.log.levels.INFO)
+                  M.load_comments_for_buffer(bufnr, true)
+                else
+                  vim.notify("❌ Failed to edit: " .. (edit_err or "unknown"), vim.log.levels.ERROR)
                 end
-              end
-
-              -- Save session to persist changes
-              save_session()
-
-              -- Clear draft after successful save
-              clear_draft(pr_number, file_path, cursor_line, "edit", comment.id)
-
-              vim.notify("✅ Local pending comment updated", vim.log.levels.INFO)
-              M.load_comments_for_buffer(bufnr, false)
+              end)
             else
               -- It's a GitHub comment, use API
               vim.notify("Updating comment...", vim.log.levels.INFO)
@@ -4360,17 +4222,16 @@ function M.delete_my_comment()
         if choice == "Yes" then
           vim.notify("Deleting comment...", vim.log.levels.INFO)
 
-          -- Check if it's a local pending comment
-          if comment.is_local then
-            local removed = remove_local_pending_comment(pr_number, comment.id)
-            if removed then
-              -- Save session to persist changes
-              save_session()
-              vim.notify("✅ Local pending comment deleted", vim.log.levels.INFO)
-              M.load_comments_for_buffer(bufnr, true)
-            else
-              vim.notify("❌ Failed to delete local comment", vim.log.levels.ERROR)
-            end
+          -- A comment of the pending review (deleted by its GraphQL node id)
+          if comment.is_pending then
+            github.delete_pending_comment(comment.node_id, function(ok, del_err)
+              if ok then
+                vim.notify("✅ Pending comment deleted", vim.log.levels.INFO)
+                M.load_comments_for_buffer(bufnr, true)
+              else
+                vim.notify("❌ Failed to delete: " .. (del_err or "unknown"), vim.log.levels.ERROR)
+              end
+            end)
           else
             -- It's a GitHub comment, use API
             github.delete_comment(pr_number, comment.id, function(ok, del_err)
@@ -4475,7 +4336,8 @@ local function restore_session(session_data)
   M._commit_mode = session_data.commit_mode or false
   M._current_commit = session_data.current_commit
   github.comment_commit_id = M._commit_mode and M._current_commit or nil
-  M._local_pending_comments = session_data.pending_comments or {}
+  -- Older versions kept pending comments in the session: move them to the GitHub pending review
+  migrate_local_pending_comments(session_data.pending_comments)
   M._drafts = session_data.drafts or {}
 
   -- Start polling for remote updates
@@ -5726,7 +5588,6 @@ local function reset_review_state()
   M._review_files = {}
   M._review_files_ordered = {}
   M._review_filter = "all"
-  M._local_pending_comments = {}
   if M._review_window and vim.api.nvim_win_is_valid(M._review_window) then
     pcall(vim.api.nvim_win_close, M._review_window, true)
   end

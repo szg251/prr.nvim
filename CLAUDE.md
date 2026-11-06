@@ -201,6 +201,10 @@ Diffs are against the merge-base of the PR head and the base branch: `heads(::he
 - The sidebar follows the review mode: `render_review_buffer()` shows the file list in PR mode and `render_commit_sidebar()` (storing `{ is_commit }` / `{ is_commit_file }` items in `pr_file_map`) in commit mode. There is no separate sidebar toggle.
 - Comments: in commit mode only comments with `original_commit_id == current commit` are shown at `original_line`; `github.comment_commit_id` makes new single comments target that commit; pending comments are blocked.
 
+### Pending Comments
+
+Pending comments are GitHub's own pending review (one per PR and user, only visible to them), so they can be continued or submitted on github.com and vice versa; nothing is stored locally (the session only keeps unsent comment `drafts`). `github.lua` uses GraphQL: `fetch_pending_review` / `get_pending_review_comments` (comments carry `is_pending` and `node_id`), `add_pending_comment` (`addPullRequestReview` when there is none, then `addPullRequestReviewThread`; serialized), `edit_pending_comment` / `delete_pending_comment` (by `node_id`) and `submit_pending_review` (`submitPullRequestReview`; init.lua's `submit_review()` falls back to a plain approve / request changes without a pending review). Pending comments may also come back from the REST comment list, so merge by id (`pending_ids`). `restore_session()` moves pending comments of old session files to GitHub (`migrate_local_pending_comments`).
+
 ### Fetching Base Content
 
 `jj file show -r <rev> <file>` (`jj.file_lines_at_async`), with `rev = diff_base_rev()` (merge-base, or the commit's parent in commit mode).
@@ -226,7 +230,7 @@ Status "A" (added): base content = empty, every line counts as changed.
 
 ### Comments
 - `:PRAddComment` - Add line comment
-- `:PRAddPendingComment` - Pending comment (not published)
+- `:PRAddPendingComment` - Pending comment (in the user's GitHub pending review, not published)
 - `:PRSubmitPendingComments` - Publish pending comments
 - `:PRListAllComments` - List all comments
 

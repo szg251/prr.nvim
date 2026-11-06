@@ -39,7 +39,8 @@ plugin brings PR reviews into your Neovim environment where you have:
 • See the full codebase - Not limited to just the changed lines
 • Efficient workflows - Built-in keybindings and smart change tracking
 • Comprehensive comment management - Add, edit, delete, reply with great UX
-• Pending comments - Draft comments locally and submit them all together
+• Pending comments - Draft comments in your GitHub pending review and submit
+  them all together (from Neovim or GitHub)
 
 Review faster, review better. Use the same environment where you write code
 to review it.
@@ -173,8 +174,10 @@ COMMENTS~
 
                                                      *:PRPendingComment*
 :PRPendingComment       Add a pending comment on the current line. The
-                        comment is saved locally and will be submitted
-                        when you run |:PRApprove| or |:PRRequestChanges|.
+                        comment goes to your pending review on GitHub
+                        (shown there as "Pending") and is submitted with
+                        |:PRSubmitPendingComments|, |:PRApprove|,
+                        |:PRRequestChanges| or on GitHub.
 
                                                      *:PRListPendingComments*
 :PRListPendingComments  List all pending comments and navigate to the
@@ -199,8 +202,8 @@ COMMENTS~
 
                                                      *:PRDeleteComment*
 :PRDeleteComment        Delete your comment on the current line. For
-                        pending comments, removes from local storage. For
-                        posted comments, deletes from GitHub.
+                        pending comments, removes it from the pending
+                        review. For posted comments, deletes from GitHub.
 
                                                      *:PRComment*
 :PRComment              Add a general comment to the PR (not tied to a
@@ -461,7 +464,8 @@ PENDING COMMENTS WORKFLOW~
 The most efficient way to review is using pending comments:
 
 1. As you review, add pending comments with |:PRPendingComment|
-2. These are saved locally (not submitted to GitHub yet)
+2. These go to your pending review on GitHub: only you see them, as
+   "Pending", and you can continue (or submit) the review on GitHub
 3. Continue reviewing, adding more pending comments
 4. Use |:PRListPendingComments| to review all your draft comments
 5. When ready, run |:PRApprove| or |:PRRequestChanges|

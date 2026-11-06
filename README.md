@@ -18,7 +18,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 - 🔍 **See the full codebase** - Not limited to just the changed lines - explore the entire context
 - ⚡ **Efficient workflows** - Built-in keybindings for navigation and smart change tracking
 - 💬 **Comprehensive comment management** - Add, edit, delete, reply to comments with a great UX
-- 📝 **Pending comments** - Draft comments locally and submit them all together when you're ready
+- 📝 **Pending comments** - Draft comments in your GitHub pending review and submit them all together when you're ready (from Neovim or GitHub)
 - 🎯 **Context-aware** - View conversation threads, see file previews, and navigate with ease
 
 **Review faster, review better.** Use the same environment where you write code to review it.
@@ -37,7 +37,7 @@ It is a experimental project and may contain bugs. Use at your own risk.
 ### Comment Management
 - 💬 **View comments inline** - PR comments appear as virtual text with reactions
 - 💬 **Add line comments** - Comment on specific lines with context
-- 💬 **Pending comments** - Draft comments locally, submit all at once
+- 💬 **Pending comments** - Draft comments in your GitHub pending review, submit all at once
 - 💬 **List all comments** - Browse all PR comments (posted + pending) with file preview
 - 💬 **Reply to comments** - Continue conversation threads
 - 💬 **Edit/Delete** - Modify or remove your comments
@@ -258,7 +258,7 @@ From the menu, press:
 
 4. **Add pending comments as you review:**
    - Use `:PRPendingComment` to draft comments
-   - All pending comments are saved locally
+   - Pending comments go to your pending review on GitHub (only you see them, as "Pending")
    - You can continue reviewing multiple files
 
 5. **Finish the review:**
@@ -468,7 +468,8 @@ When reviewing a file of the PR, you'll see three floating windows providing con
 One of the most efficient ways to review is using **pending comments**:
 
 1. As you review, add pending comments with `:PRPendingComment`
-2. These are saved locally (not submitted to GitHub yet)
+2. These go to your pending review on GitHub: only you see them, as "Pending", and you can switch to GitHub
+   at any time to continue or submit the review there (and back: comments added on GitHub show up here)
 3. Continue reviewing, adding more pending comments
 4. Use `:PRListPendingComments` to review all your draft comments
 5. When ready, run `:PRApprove` or `:PRRequestChanges`

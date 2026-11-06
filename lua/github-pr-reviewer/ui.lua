@@ -487,7 +487,7 @@ end
 
 -- All comments picker functions (with preview)
 local function format_all_comment(comment)
-  local status = comment.is_local and "[Pending]" or "[Posted]"
+  local status = comment.is_pending and "[Pending]" or "[Posted]"
   return string.format("%s %s", status, comment.path)
 end
 
@@ -531,7 +531,7 @@ local function select_all_comments_fzf(comments, callback)
   local temp_files = {}
   for i, comment in ipairs(comments) do
     local temp_file = temp_dir .. "/comment_" .. i .. ".txt"
-    local status = comment.is_local and "[Pending]" or "[Posted]"
+    local status = comment.is_pending and "[Pending]" or "[Posted]"
     local lines = {}
     table.insert(lines, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     table.insert(lines, string.format("%s %s:%d", status, comment.path, comment.line))
@@ -550,7 +550,7 @@ local function select_all_comments_fzf(comments, callback)
   -- Create entries with index
   local entries = {}
   for i, comment in ipairs(comments) do
-    local status = comment.is_local and "[Pending]" or "[Posted]"
+    local status = comment.is_pending and "[Pending]" or "[Posted]"
     local entry = string.format("%d|%s %s", i, status, comment.path)
     table.insert(entries, entry)
   end
@@ -628,7 +628,7 @@ local function select_all_comments_telescope(comments, callback)
 
           -- Show comment info
           local lines = {}
-          local status = comment.is_local and "[Pending]" or "[Posted]"
+          local status = comment.is_pending and "[Pending]" or "[Posted]"
           table.insert(lines, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
           table.insert(lines, string.format("%s %s:%d", status, comment.path, comment.line))
           table.insert(lines, string.format("Author: %s", comment.user))

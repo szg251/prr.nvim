@@ -1,6 +1,7 @@
 local M = {}
 
 M._comments_cache = {}
+M._pr_node_ids = {} -- PR number -> GraphQL node id
 
 -- Debug logging helper
 local function debug_log(msg)
@@ -659,116 +660,6 @@ function M.get_current_user(callback)
 end
 
 -- Submit a review with comments and event (APPROVE, REQUEST_CHANGES, or COMMENT)
-function M.submit_review_with_comments(pr_number, event, body, comments, callback)
-  local get_head_cmd = string.format("gh pr view %d --json headRefOid --jq '.headRefOid'", pr_number)
-
-  vim.fn.jobstart(get_head_cmd, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      if not data or not data[1] or data[1] == "" then
-        vim.schedule(function()
-          callback(false, "Failed to get PR head commit")
-        end)
-        return
-      end
-
-      local commit_id = data[1]:gsub("%s+", "")
-
-      -- Build comments array for API
-      local api_comments = {}
-      for _, comment in ipairs(comments) do
-        if comment.line and type(comment.line) == "number" and comment.line > 0 then
-          local api_comment = {
-            path = comment.path,
-            line = comment.line,
-            body = comment.body,
-          }
-
-          -- Add start_line for multi-line comments
-          if comment.start_line and comment.start_line ~= comment.line then
-            api_comment.start_line = comment.start_line
-            api_comment.start_side = "RIGHT"
-          end
-
-          table.insert(api_comments, api_comment)
-        end
-      end
-
-      local review_body = {
-        commit_id = commit_id,
-        event = event,
-        comments = api_comments
-      }
-
-      -- Add body if provided
-      if body and body ~= "" then
-        review_body.body = body
-      end
-
-      local review_json = vim.fn.json_encode(review_body)
-
-      local cmd = string.format(
-        "gh api repos/{owner}/{repo}/pulls/%d/reviews -X POST --input -",
-        pr_number
-      )
-
-      local stderr_output = {}
-      local stdout_output = {}
-      local job_id = vim.fn.jobstart(cmd, {
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_stdout = function(_, out_data)
-          if out_data then
-            vim.list_extend(stdout_output, out_data)
-          end
-        end,
-        on_stderr = function(_, err_data)
-          if err_data then
-            vim.list_extend(stderr_output, err_data)
-          end
-        end,
-        on_exit = function(_, code)
-          vim.schedule(function()
-            if code == 0 then
-              M._comments_cache[pr_number] = nil
-              callback(true, nil)
-            else
-              local err_msg = table.concat(stderr_output, "\n")
-              local out_msg = table.concat(stdout_output, "\n")
-
-              -- Check if error is about lines not being resolved
-              if out_msg:match("Line could not be resolved") and #api_comments > 0 then
-                -- Show which comments have problematic lines
-                local error_lines = { "❌ Failed to submit review: some comment lines are no longer in the diff." }
-                table.insert(error_lines, "")
-                table.insert(error_lines, "Pending comments with potentially invalid lines:")
-                for i, c in ipairs(api_comments) do
-                  table.insert(error_lines, string.format("  %d. %s:%d", i, c.path, c.line))
-                end
-                table.insert(error_lines, "")
-                table.insert(error_lines, "Please delete the outdated pending comments with :PRListPendingComments")
-                vim.notify(table.concat(error_lines, "\n"), vim.log.levels.ERROR)
-                callback(false, "Lines could not be resolved - comments are outdated")
-              else
-                -- Show error for issue reporting
-                local error_lines = { "❌ Failed to submit review (HTTP 422)" }
-                table.insert(error_lines, "")
-                table.insert(error_lines, "stderr: " .. err_msg)
-                table.insert(error_lines, "response: " .. out_msg)
-                vim.notify(table.concat(error_lines, "\n"), vim.log.levels.ERROR)
-                callback(false, "Failed to submit review: " .. err_msg)
-              end
-            end
-          end)
-        end,
-      })
-
-      vim.fn.chansend(job_id, review_json)
-      vim.fn.chanclose(job_id, "stdin")
-    end,
-  })
-end
-
 function M.approve_pr(pr_number, body, callback)
   local cmd
   if body and body ~= "" then
@@ -981,290 +872,210 @@ function M.delete_comment(pr_number, comment_id, callback)
 end
 
 -- Helper function to create a pending review with comments
-local function create_pending_review_with_comments(pr_number, commit_id, comments, callback)
-  vim.schedule(function()
-    debug_log(string.format("Debug: Creating review with %d comments", #comments))
-  end)
+-- ===== Pending review (GitHub's own draft review: one per PR and user, only visible to them) =====
 
-  local review_body = vim.fn.json_encode({
-    commit_id = commit_id,
-    body = "",  -- Empty body for the review itself
-    comments = comments
-  })
-
-  vim.schedule(function()
-    debug_log(string.format("Debug: Review body: %s", review_body:sub(1, 300)))
-  end)
-
-  local cmd = string.format(
-    "gh api repos/{owner}/{repo}/pulls/%d/reviews -X POST --input -",
-    pr_number
-  )
-
-  local stderr_output = {}
-  local stdout_output = {}
-  local job_id = vim.fn.jobstart(cmd, {
-    stdout_buffered = true,
-    stderr_buffered = true,
-    on_stdout = function(_, out_data)
-      if out_data then
-        vim.list_extend(stdout_output, out_data)
-      end
-    end,
-    on_stderr = function(_, err_data)
-      if err_data then
-        vim.list_extend(stderr_output, err_data)
-      end
-    end,
-    on_exit = function(_, code)
-      vim.schedule(function()
-        if code == 0 then
-          M._comments_cache[pr_number] = nil
-          callback(true, nil)
-        else
-          local err_msg = table.concat(stderr_output, "\n")
-          local out_msg = table.concat(stdout_output, "\n")
-          debug_log(string.format("Debug: Create failed - Stdout: %s", out_msg))
-          debug_log(string.format("Debug: Create failed - Stderr: %s", err_msg))
-          callback(false, "Failed to create pending review: " .. err_msg)
-        end
-      end)
-    end,
-  })
-
-  vim.fn.chansend(job_id, review_body)
-  vim.fn.chanclose(job_id, "stdin")
-end
-
--- Add a pending review comment (part of a review draft)
--- This creates a single-comment review that can be submitted later
-function M.add_pending_review_comment(pr_number, path, line, body, callback)
-  local get_head_cmd = string.format("gh pr view %d --json headRefOid --jq '.headRefOid'", pr_number)
-
-  vim.fn.jobstart(get_head_cmd, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      if not data or not data[1] or data[1] == "" then
-        vim.schedule(function()
-          callback(false, "Failed to get PR head commit")
-        end)
+-- Run a GraphQL query. String variables go in vars (-f, raw); numbers and the {owner} / {repo}
+-- placeholders, which gh only fills in -F fields, go in typed_vars.
+-- callback(data, err)
+local function graphql(query, vars, typed_vars, callback)
+  local cmd = { "gh", "api", "graphql", "-f", "query=" .. query }
+  for k, v in pairs(vars or {}) do
+    vim.list_extend(cmd, { "-f", k .. "=" .. v })
+  end
+  for k, v in pairs(typed_vars or {}) do
+    vim.list_extend(cmd, { "-F", k .. "=" .. tostring(v) })
+  end
+  vim.system(cmd, { text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 then
+        callback(nil, vim.trim(result.stderr ~= "" and result.stderr or result.stdout or "gh api graphql failed"))
         return
       end
+      local ok, decoded = pcall(vim.json.decode, result.stdout or "", { luanil = { object = true, array = true } })
+      if not ok or type(decoded) ~= "table" then
+        callback(nil, "Failed to parse GraphQL response")
+        return
+      end
+      callback(decoded.data, nil)
+    end)
+  end)
+end
 
-      local commit_id = data[1]:gsub("%s+", "")
-
-      -- First, check if there's a pending review (even if empty)
-      local get_review_cmd = string.format(
-        "gh api --paginate repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | select(.state == \"PENDING\") | .id' | head -n 1",
-        pr_number
-      )
-
-      vim.fn.jobstart(get_review_cmd, {
-        stdout_buffered = true,
-        on_stdout = function(_, review_data)
-          local review_id = nil
-          if review_data and review_data[1] and review_data[1] ~= "" then
-            review_id = tonumber((review_data[1]:gsub("%s+", "")))
-          end
-
-          if review_id then
-            vim.schedule(function()
-              debug_log(string.format("Debug: Found existing pending review ID: %d", review_id))
-            end)
-
-            -- Get existing comments from the pending review
-            M.get_pending_review_comments(pr_number, function(existing_comments, err)
-              vim.schedule(function()
-                debug_log(string.format("Debug: Found %d existing pending comments", #(existing_comments or {})))
-              end)
-
-              -- Build the comments array with existing + new comment
-              local all_comments = {}
-
-              -- Add existing comments (only if they have a valid line number)
-              for _, ec in ipairs(existing_comments or {}) do
-                if ec.line and type(ec.line) == "number" and ec.line > 0 then
-                  table.insert(all_comments, {
-                    path = ec.path,
-                    line = ec.line,
-                    body = ec.body,
-                  })
-                end
-              end
-
-              -- Add the new comment
-              table.insert(all_comments, {
-                path = path,
-                line = line,
-                body = body,
-              })
-
-              vim.schedule(function()
-                debug_log(string.format("Debug: Total comments to add: %d", #all_comments))
-                debug_log(string.format("Debug: Deleting existing review ID: %d", review_id))
-              end)
-
-              -- Delete the existing pending review
-              local delete_cmd = string.format(
-                "gh api repos/{owner}/{repo}/pulls/%d/reviews/%d -X DELETE",
-                pr_number,
-                review_id
-              )
-
-              vim.fn.jobstart(delete_cmd, {
-                on_exit = function(_, del_code)
-                  vim.schedule(function()
-                    debug_log(string.format("Debug: Delete exit code: %d", del_code))
-                    if del_code == 0 then
-                      -- Now create the new review with all comments
-                      create_pending_review_with_comments(pr_number, commit_id, all_comments, callback)
-                    else
-                      callback(false, "Failed to delete existing pending review")
-                    end
-                  end)
-                end,
-              })
-            end)
-          else
-            vim.schedule(function()
-              debug_log("Debug: No existing pending review found")
-            end)
-
-            -- No existing review, just create new with the comment
-            local all_comments = {
-              {
-                path = path,
-                line = line,
-                body = body,
-              }
+local PENDING_REVIEW_QUERY = [[
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+      reviews(states: PENDING, first: 1) {
+        nodes {
+          id
+          comments(first: 100) {
+            nodes {
+              id databaseId path line originalLine startLine originalStartLine body createdAt
+              author { login }
             }
-            create_pending_review_with_comments(pr_number, commit_id, all_comments, callback)
-          end
-        end,
+          }
+        }
+      }
+    }
+  }
+}]]
+
+-- The current user's pending review of the PR. callback(review, err), review = nil when there is
+-- none, else { id = node id, comments = { { id (database id), node_id, path, line, start_line, body,
+-- user, created_at, is_pending = true } } }
+function M.fetch_pending_review(pr_number, callback)
+  graphql(PENDING_REVIEW_QUERY, nil, { owner = "{owner}", repo = "{repo}", number = pr_number }, function(data, err)
+    local pr = data and data.repository and data.repository.pullRequest
+    if not pr then
+      callback(nil, err or "PR not found")
+      return
+    end
+    M._pr_node_ids[pr_number] = pr.id
+    local node = pr.reviews.nodes[1]
+    if not node then
+      callback(nil, nil)
+      return
+    end
+    local review = { id = node.id, comments = {} }
+    for _, c in ipairs(node.comments.nodes) do
+      table.insert(review.comments, {
+        id = c.databaseId,
+        node_id = c.id,
+        path = c.path,
+        line = c.line or c.originalLine,
+        start_line = c.startLine or c.originalStartLine,
+        body = c.body,
+        user = c.author and c.author.login,
+        created_at = c.createdAt,
+        is_pending = true,
+        reactions = {},
       })
-    end,
-  })
+    end
+    callback(review, nil)
+  end)
 end
 
--- Get pending review comments
+-- Comments of the current user's pending review. callback(comments, err)
 function M.get_pending_review_comments(pr_number, callback)
-  local cmd = string.format(
-    "gh api --paginate repos/{owner}/{repo}/pulls/%d/reviews --jq '.[] | select(.state == \"PENDING\") | .id'",
-    pr_number
-  )
-
-  vim.fn.jobstart(cmd, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      if not data or #data == 0 or (data[1] == "" and #data == 1) then
-        vim.schedule(function()
-          callback({}, nil)
-        end)
-        return
-      end
-
-      -- Parse all review IDs
-      local review_ids = {}
-      for _, line in ipairs(data) do
-        local cleaned = line:gsub("%s+", "")
-        if cleaned ~= "" then
-          local id = tonumber(cleaned)
-          if id then
-            table.insert(review_ids, id)
-          end
-        end
-      end
-
-      if #review_ids == 0 then
-        vim.schedule(function()
-          callback({}, nil)
-        end)
-        return
-      end
-
-      -- Collect comments from all pending reviews
-      local all_comments = {}
-      local pending_requests = #review_ids
-
-      for _, review_id in ipairs(review_ids) do
-        -- Get all fields to find the absolute line number
-        local comments_cmd = string.format(
-          "gh api --paginate repos/{owner}/{repo}/pulls/%d/reviews/%d/comments --jq '.[]'",
-          pr_number,
-          review_id
-        )
-
-        vim.fn.jobstart(comments_cmd, {
-          stdout_buffered = true,
-          on_stdout = function(_, comments_data)
-            if comments_data and #comments_data > 0 then
-              -- One comment object per line (--jq '.[]' over every page)
-              local objects = vim.tbl_filter(function(l)
-                return l ~= ""
-              end, comments_data)
-              local ok, comments_array = pcall(vim.fn.json_decode, "[" .. table.concat(objects, ",") .. "]")
-
-              if ok and comments_array then
-                for _, comment in ipairs(comments_array) do
-                  if comment and comment.path then
-                    -- Try multiple fields to get the line number
-                    -- Priority: line > original_line > start_line > position
-                    local line_num = comment.line or comment.original_line or comment.start_line or comment.position
-
-                    -- Ensure it's a valid number
-                    if line_num == vim.NIL or type(line_num) ~= "number" then
-                      line_num = nil
-                    end
-
-                    -- Debug: log all line-related fields
-                    vim.schedule(function()
-                      debug_log(string.format("Debug: Comment fields - line=%s, original_line=%s, start_line=%s, position=%s, original_position=%s",
-                        tostring(comment.line),
-                        tostring(comment.original_line),
-                        tostring(comment.start_line),
-                        tostring(comment.position),
-                        tostring(comment.original_position)), vim.log.levels.INFO)
-                    end)
-
-                    table.insert(all_comments, {
-                      id = comment.id,
-                      path = comment.path,
-                      line = line_num,
-                      body = comment.body,
-                      user = comment.user and comment.user.login or comment.user,
-                      created_at = comment.created_at,
-                      in_reply_to_id = comment.in_reply_to_id,
-                      reactions = {},
-                    })
-                  end
-                end
-              end
-            end
-
-            pending_requests = pending_requests - 1
-            if pending_requests == 0 then
-              vim.schedule(function()
-                callback(all_comments, nil)
-              end)
-            end
-          end,
-          on_exit = function(_, code)
-            if code ~= 0 then
-              pending_requests = pending_requests - 1
-              if pending_requests == 0 then
-                vim.schedule(function()
-                  callback(all_comments, nil)
-                end)
-              end
-            end
-          end,
-        })
-      end
-    end,
-  })
+  M.fetch_pending_review(pr_number, function(review, err)
+    callback(review and review.comments or {}, err)
+  end)
 end
 
--- Get reactions for a comment
+-- Pending review mutations run one at a time, so two quick adds don't both create a review
+local pending_queue, pending_running = {}, false
+
+local function run_pending_queue()
+  if pending_running or #pending_queue == 0 then
+    return
+  end
+  pending_running = true
+  local job = table.remove(pending_queue, 1)
+  job(function()
+    pending_running = false
+    run_pending_queue()
+  end)
+end
+
+local function enqueue_pending(job)
+  table.insert(pending_queue, job)
+  run_pending_queue()
+end
+
+-- The pending review's node id, creating the review if there is none. callback(review_id, err)
+local function ensure_pending_review(pr_number, callback)
+  M.fetch_pending_review(pr_number, function(review, err)
+    if review then
+      callback(review.id)
+      return
+    end
+    if err then
+      callback(nil, err)
+      return
+    end
+    graphql([[mutation($pr: ID!) { addPullRequestReview(input: {pullRequestId: $pr}) { pullRequestReview { id } } }]],
+      { pr = M._pr_node_ids[pr_number] }, nil, function(data, create_err)
+        local created = data and data.addPullRequestReview and data.addPullRequestReview.pullRequestReview
+        callback(created and created.id, create_err or (not created and "Failed to create pending review" or nil))
+      end)
+  end)
+end
+
+-- Add a comment on the PR head (lines start_line..line of the new side; start_line optional) to the
+-- current user's pending review, creating it if needed. callback(ok, err)
+function M.add_pending_comment(pr_number, path, line, body, start_line, callback)
+  enqueue_pending(function(done)
+    local function finish(ok, err)
+      done()
+      callback(ok, err)
+    end
+    ensure_pending_review(pr_number, function(review_id, err)
+      if not review_id then
+        finish(false, err)
+        return
+      end
+      local vars = { review = review_id, path = path, body = body }
+      local typed = { line = line }
+      local range_params, range_args = "", ""
+      if start_line and start_line ~= line then
+        typed.startLine = start_line
+        range_params, range_args = ", $startLine: Int!", ", startLine: $startLine, startSide: RIGHT"
+      end
+      local query = string.format([[
+mutation($review: ID!, $path: String!, $body: String!, $line: Int!%s) {
+  addPullRequestReviewThread(input: {pullRequestReviewId: $review, path: $path, body: $body, line: $line, side: RIGHT%s}) {
+    thread { id }
+  }
+}]], range_params, range_args)
+      graphql(query, vars, typed, function(data, add_err)
+        local thread = data and data.addPullRequestReviewThread and data.addPullRequestReviewThread.thread
+        finish(thread ~= nil, add_err or (not thread and "GitHub did not create the comment" or nil))
+      end)
+    end)
+  end)
+end
+
+-- Edit a comment of the pending review (node_id from fetch_pending_review). callback(ok, err)
+function M.edit_pending_comment(node_id, body, callback)
+  graphql([[mutation($id: ID!, $body: String!) {
+  updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $id, body: $body}) { pullRequestReviewComment { id } }
+}]], { id = node_id, body = body }, nil, function(data, err)
+    callback(data ~= nil, err)
+  end)
+end
+
+-- Delete a comment of the pending review (node_id from fetch_pending_review). callback(ok, err)
+function M.delete_pending_comment(node_id, callback)
+  graphql([[mutation($id: ID!) { deletePullRequestReviewComment(input: {id: $id}) { clientMutationId } }]],
+    { id = node_id }, nil, function(data, err)
+      callback(data ~= nil, err)
+    end)
+end
+
+-- Submit the current user's pending review with event "COMMENT" | "APPROVE" | "REQUEST_CHANGES".
+-- callback(ok, err, submitted): submitted = false when there is no pending review (nothing was sent)
+function M.submit_pending_review(pr_number, event, body, callback)
+  enqueue_pending(function(done)
+    M.fetch_pending_review(pr_number, function(review, err)
+      if not review then
+        done()
+        callback(err == nil, err, false)
+        return
+      end
+      graphql([[mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String!) {
+  submitPullRequestReview(input: {pullRequestReviewId: $review, event: $event, body: $body}) { pullRequestReview { id } }
+}]], { review = review.id, event = event, body = body or "" }, nil, function(data, submit_err)
+        done()
+        if data then
+          M._comments_cache[pr_number] = nil
+        end
+        callback(data ~= nil, submit_err, data ~= nil)
+      end)
+    end)
+  end)
+end
+
 function M.get_comment_reactions(comment_id, callback)
   -- PR review comments use /pulls/comments, not /issues/comments
   local cmd = string.format(
@@ -1379,8 +1190,6 @@ function M.remove_comment_reaction(comment_id, reaction_id, callback)
 end
 
 -- ===== Viewed files (GitHub's per-file "Viewed" checkbox, per user) =====
-
-M._pr_node_ids = {} -- PR number -> GraphQL node id
 
 local VIEWED_FILES_QUERY = [[
 query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
